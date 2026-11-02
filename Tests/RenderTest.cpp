@@ -53,6 +53,8 @@ static void writeWav (const std::string& path, const std::vector<float>& l, cons
     std::fclose (f);
 }
 
+static MurmurEngine* g_eng = nullptr; // lets a scenario play MIDI notes
+
 struct Result { float peak = 0, rms = 0, tailRms = 0, maxJump = 0, jumpAt = 0; bool nan = false; };
 
 // script(t, params) is called once per block so a scenario can press buttons over time
@@ -67,6 +69,7 @@ static Result run (const std::string& name, float seconds,
 
     MurmurEngine eng;
     eng.prepare (kFs);
+    g_eng = &eng;
     EngineParams p;
     p.mix = 1.0f;
     p.dryKill = true;
@@ -160,6 +163,25 @@ int main (int argc, char** argv)
         check (run ("spread_loop_mode" + std::to_string (mode), 10,
                     [mode] (float t, EngineParams& p) { p.spread = true; p.loopOn = t > 2.8f; p.loopMode = mode; p.loopModify = mode == 2 ? 0.6f : 0.7f; p.length = 0.5f; }, out));
     check (run ("classic_everything", 12, [] (float t, EngineParams& p) { p.classic = true; p.clock = 0.55f; p.wetOn = true; p.wetMode = 0; p.wetModify = 0.6f; p.loopOn = t > 2.8f; p.loopMode = 2; p.loopModify = 0.65f; }, out));
+
+    // ---- Motion, tempo and Synth Mode ----
+    check (run ("bounce_clock_triangle", 10, [] (float t, EngineParams& p) { p.loopOn = t > 2.8f; p.rampClock = true; p.bounce = true; p.rampSpeed = 0.3f; p.rampWave = 0.0f; p.clock = 1.0f; }, out));
+    check (run ("bounce_time_square_delay", 10, [] (float, EngineParams& p) { p.wetOn = true; p.wetMode = 1; p.wetModify = 0.5f; p.rampTime = true; p.rampSpeed = 0.5f; p.rampWave = 0.25f; p.time = 0.7f; }, out));
+    check (run ("bounce_random_loopmod", 10, [] (float t, EngineParams& p) { p.loopOn = t > 2.8f; p.loopMode = 1; p.rampLoopMod = true; p.rampSpeed = 0.6f; p.rampWave = 1.0f; p.sweepTop = true; p.loopModify = 0.5f; }, out));
+    check (run ("ramp_once_clock", 8, [] (float t, EngineParams& p) { p.wetOn = t > 1.0f; p.wetMode = 0; p.rampClock = true; p.bounce = false; p.rampSpeed = 0.2f; p.clock = 1.0f; }, out));
+    check (run ("expression_wetmod", 8, [] (float t, EngineParams& p) { p.wetOn = true; p.wetMode = 0; p.rampWetMod = true; p.modSource = 1; p.expression = clampf (t / 8.0f, 0, 1); }, out));
+    check (run ("tempo_sync_delay_8th", 8, [] (float, EngineParams& p) { p.wetOn = true; p.wetMode = 1; p.wetModify = 0.5f; p.bpm = 120.0f; p.time = 0.55f; }, out));
+    check (run ("tempo_sync_loop_bar", 10, [] (float t, EngineParams& p) { p.bpm = 120.0f; p.loopOn = t > 2.5f; p.loopMode = 1; p.length = 0.75f; }, out));
+    check (run ("synth_adsr_notes", 10, [] (float t, EngineParams& p) {
+        static int last = -1;
+        p.loopOn = t > 2.8f; p.loopMode = 2; p.loopModify = 0.5f; p.synthGate = 2;
+        const int step = (int) ((t - 3.0f) / 0.5f);
+        if (t > 3.0f && step != last) { if (last >= 0) g_eng->synthNoteOff (55 + (last % 4) * 3); g_eng->synthNoteOn (55 + (step % 4) * 3, 0.9f); last = step; }
+        if (t < 0.01f) last = -1; }, out));
+    check (run ("synth_drone_glide", 8, [] (float t, EngineParams& p) {
+        p.wetOn = true; p.wetMode = 0; p.wetModify = 0.8f; p.synthGate = 0; p.glide = 0.3f;
+        if (t > 2.0f && t < 2.01f) g_eng->synthNoteOn (48, 1.0f);
+        if (t > 4.0f && t < 4.01f) g_eng->synthNoteOn (60, 1.0f); }, out));
 
     std::printf ("\n%s (%d failures)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures);
     return failures == 0 ? 0 : 1;

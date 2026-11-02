@@ -27,6 +27,7 @@ public:
         float toneHz = 20000.0f;
         float coreRate = 64000.0f;
         int syncLen = 0;        // > 0: Time snaps to divisions of this length (wet follows loop)
+        float fixedLen = 0.0f;  // > 0: tempo sync sets Delay and Slip time directly (core samples)
     };
 
     void prepare()
@@ -149,8 +150,8 @@ private:
         return clampf ((float) p.syncLen / (float) divs[idx], lo, hi);
     }
     float sizeFor (const Params& p) const { return p.syncLen > 0 ? synced (p, 600, 24000) : reverbSize (p.time); }
-    float delayFor (const Params& p) const { return p.syncLen > 0 ? synced (p, 16, 130000) : clampf (delaySamples (p.time), 16, 130000); }
-    float slipFor (const Params& p) const { return p.syncLen > 0 ? synced (p, 64, 65536) : clampf (slipSize (p.time), 64, 65536); }
+    float delayFor (const Params& p) const { return p.syncLen > 0 ? synced (p, 16, 130000) : clampf (p.fixedLen > 0 ? p.fixedLen : delaySamples (p.time), 16, 130000); }
+    float slipFor (const Params& p) const { return p.syncLen > 0 ? synced (p, 64, 65536) : clampf (p.fixedLen > 0 ? p.fixedLen : slipSize (p.time), 64, 65536); }
 
     // ---- Reverb ------------------------------------------------------------------------
     Stereo reverb (Stereo in, const Params& p)
@@ -275,10 +276,18 @@ private:
             dCur = dA;
         }
 
-        if (p.spread) // ping-pong
+        if (p.spread)
         {
-            dly[0].push (softClip (0.5f * (in.l + in.r) + fb * o.r));
-            dly[1].push (softClip (fb * o.l));
+            // Ping-pong that mirrors your panning: each echo swaps sides, so a sound 30%
+            // right alternates between 30% right and 30% left. A centred (mono) input has
+            // nothing to mirror, so it is fed to one side to start a classic ping-pong.
+            const float mid = 0.5f * (in.l + in.r), side = 0.5f * (in.l - in.r);
+            const float a = std::fabs (mid), b = std::fabs (side);
+            monoEnv += 0.001f * ((a > 1e-6f ? clampf (1.0f - 4.0f * b / (a + 1e-6f), 0, 1) : monoEnv) - monoEnv);
+            const float inL = lerpf (in.l, mid * 2.0f, monoEnv);
+            const float inR = lerpf (in.r, 0.0f, monoEnv);
+            dly[0].push (softClip (inL + fb * o.r));
+            dly[1].push (softClip (inR + fb * o.l));
         }
         else
         {
@@ -456,6 +465,7 @@ private:
     float dA = 4096, dB = 4096, dCur = 4096;
     int xfade = 0;
 
+    float monoEnv = 1.0f;
     SlipPlayer slipCur, slipPrev;
     float slipCounter = 0, slipPan = 0;
 

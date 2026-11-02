@@ -1,20 +1,25 @@
-# Murmur v0.1
+# Murmur v0.2
 
 A stereo VST3 inspired by the way a certain two-channel ambient pedal behaves: an always-listening micro-looper, a Wet Channel of spatial effects, and a Clock that resamples everything in musical steps. All DSP here is original code written from public descriptions of the pedal's behaviour.
 
-## What's in v0.1
+## What's in v0.2
 
 | Area | Included |
 | --- | --- |
-| Clock | 2 kHz to 64 kHz engine rate, stepped in octaves, fourths and fifths, or semitones, plus Smooth |
-| Wet Channel | Reverb (multi-tap cluster smeared into a reverb), Delay (clean time jumps), Slip (auto-sampler), Freeze for each |
-| Micro-Looper | Always listening, Env, Tape and Stretch modes, overdub, fade, Refresh (No Dub) |
+| Clock | 2 kHz to 64 kHz engine rate. Default steps copy the pedal's 11 stops (64, 48, 32, 24, 16, 12, 8, 6, 4, 3, 2 kHz). Octave, fourths and fifths, semitone and Smooth options |
+| Wet Channel | Reverb (multi-tap cluster smeared into a reverb), Delay (clean time jumps, ping-pong that mirrors your panning), Slip (chunk delay: echoes play back pitched or reversed), Freeze for each |
+| Micro-Looper | Always listening, Env, Tape and Stretch (the MKII's stepped speeds), overdub, fade, Refresh (No Dub) |
 | Interaction | Routing (In, Both, Loop), the looper records the Wet Channel while listening, Direct micro-loop blend, Channel Sync both ways |
-| Stereo | Spread per mode, MISO, Stereo Width, Spread Solo |
+| Footswitches | Tap to switch a channel on or off, hold to freeze (Wet) or overdub (Loop). Latch makes hold a toggle |
+| Motion | Ramp or bounce any of Time, Wet Modify, Clock, Loop Modify and Length, with the five morphing waveforms, Top or Bottom sweep, or drive them from an expression value |
+| Tempo | Sync Delay and Slip time to note values and the looper to one bar, from Ableton's tempo or tap tempo |
+| Synth Mode | MIDI notes play the Clock in semitones. Drone (the pedal's default), Gate or ADSR, glide, pitch bend, and a movable original-pitch note. Move Clock to leave |
+| MIDI | Responds to the pedal's MIDI CC map, and program change 0, 1 and 2 for Live, B and A |
+| Presets | A / LIVE / B toggle like the pedal. Hold A or B to save into it |
 | Character | Classic mode: clock noise, deteriorating loops, ringing reverb, aliased Slip, bendy Delay, chopping Tape, wispy Stretch |
-| Extras | Input and output gain, Max Buffer length (1 to 32 s at 64 kHz), Level Balance, Tone, Trails, Dry Kill, Latch |
+| Look | Flip Fella style: flip cards, Karlsson clock dial, and Pebble, who reacts to what the looper is doing |
 
-Coming next (from the spec): ramp and bounce modulation, LFOs, envelope follower, macro, internal clock and tap tempo, step sequencer, Synth Mode, MIDI learn, presets with A/B morph, loop export, and saving the loop buffer with your set.
+To play Synth Mode in Ableton, put Murmur on an audio track, then set a MIDI track's "MIDI To" to that track and choose Murmur.
 
 ## Getting a Windows VST3 (no compiler needed)
 

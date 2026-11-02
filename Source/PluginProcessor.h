@@ -3,12 +3,13 @@
 #include "Params.h"
 #include "engine/MurmurEngine.h"
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <map>
 
-class MurmurProcessor : public juce::AudioProcessor
+class MurmurProcessor : public juce::AudioProcessor, private juce::Timer
 {
 public:
     MurmurProcessor();
-    ~MurmurProcessor() override = default;
+    ~MurmurProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -36,23 +37,42 @@ public:
     juce::AudioProcessorValueTreeState apvts;
     const murmur::MurmurEngine& getEngine() const { return engine; }
 
+    // ---- called from the editor (message thread) ----
+    void tapTempo();
+    void savePresetSlot (int slot);           // 0 = A, 2 = B, like holding the pedal's footswitches
+    bool hasPresetSlot (int slot) const;
+    void resetHiddenOptions();
+    float currentBpm() const { return uiBpm.load(); } // 0 when not synced
+
 private:
+    void timerCallback() override;
     murmur::EngineParams readParams() const;
+    void handleMidi (const juce::MidiMessage&);
+    void queueValue (const juce::String& id, float plainValue);
+    void setNow (const juce::String& id, float plainValue);
+    juce::ValueTree snapshotOf() const;
+    void applySnapshot (const juce::ValueTree&);
+    static bool inSnapshot (const juce::String& id);
 
     murmur::MurmurEngine engine;
-    juce::AudioBuffer<float> work;
 
-    struct Raw
-    {
-        std::atomic<float>* p = nullptr;
-        float get() const { return p->load (std::memory_order_relaxed); }
-        bool on() const { return get() > 0.5f; }
-        int idx() const { return (int) std::lround (get()); }
-    };
-    Raw mix, clock, routing, wetOn, freeze, wetMode, time, wetModify, loopOn, overdub, loopMode, length, loopModify,
-        width, tone, fade, direct, balance, sync, halfLength, spreadSolo,
-        miso, spread, dryKill, trails, noDub, smoothClock, classic,
-        inGain, outGain, bufferSeconds, stepSet;
+    std::map<juce::String, std::atomic<float>*> raw;
+    float f (const char* id) const { return raw.at (id)->load (std::memory_order_relaxed); }
+    bool on (const char* id) const { return f (id) > 0.5f; }
+    int idx (const char* id) const { return (int) std::lround (f (id)); }
+
+    // MIDI CC changes are made on the message thread
+    struct Pending { int param = 0; float value = 0; };
+    juce::AbstractFifo fifo { 512 };
+    std::array<Pending, 512> pending;
+    juce::Array<juce::RangedAudioParameter*> params;
+    std::map<juce::String, int> paramIndex;
+
+    std::atomic<int> pendingTaps { 0 }, pendingProgram { -1 };
+    std::atomic<float> uiBpm { 0.0f };
+    juce::Array<double> tapTimes;
+    float lastClock = -1.0f;
+    int lastSlot = 1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MurmurProcessor)
 };

@@ -46,6 +46,37 @@ inline constexpr auto inGain = "inGain";
 inline constexpr auto outGain = "outGain";
 inline constexpr auto bufferSeconds = "bufferSeconds";
 inline constexpr auto stepSet = "stepSet";
+
+// ramping and expression (the pedal's left dip-switch bank)
+inline constexpr auto rampTime = "rampTime";
+inline constexpr auto rampWetMod = "rampWetMod";
+inline constexpr auto rampClock = "rampClock";
+inline constexpr auto rampLoopMod = "rampLoopMod";
+inline constexpr auto rampLength = "rampLength";
+inline constexpr auto bounce = "bounce";
+inline constexpr auto sweep = "sweep";
+inline constexpr auto rampSpeed = "rampSpeed";
+inline constexpr auto rampWave = "rampWave";
+inline constexpr auto modSource = "modSource";
+inline constexpr auto expression = "expression";
+inline constexpr auto expPolarity = "expPolarity";
+
+// tempo
+inline constexpr auto tempoSync = "tempoSync";
+inline constexpr auto tapBpm = "tapBpm";
+
+// Synth Mode
+inline constexpr auto synthEnable = "synthEnable";
+inline constexpr auto synthGate = "synthGate";
+inline constexpr auto attack = "attack";
+inline constexpr auto decay = "decay";
+inline constexpr auto sustain = "sustain";
+inline constexpr auto release = "release";
+inline constexpr auto glide = "glide";
+inline constexpr auto synthRoot = "synthRoot";
+
+// the pedal's preset toggle
+inline constexpr auto presetSlot = "presetSlot";
 } // namespace ParamIDs
 
 inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
@@ -125,7 +156,61 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
                                      AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " dB"; })));
     layout.add (std::make_unique<P> (ParameterID { ParamIDs::bufferSeconds, 1 }, "Max Buffer", NormalisableRange<float> (1.0f, 32.0f, 0.0f, 0.5f), 2.0f,
                                      AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return String (v, 1) + " s"; })));
-    choice (ParamIDs::stepSet, "Clock Steps", { "Octaves", "Fourths & fifths", "Semitones" }, 1);
+    choice (ParamIDs::stepSet, "Clock Steps", { "Pedal", "Octaves", "Fourths & fifths", "Semitones" }, 0);
+
+    // ---- ramping and expression ----
+    toggle (ParamIDs::rampTime, "Ramp Time", false);
+    toggle (ParamIDs::rampWetMod, "Ramp Wet Modify", false);
+    toggle (ParamIDs::rampClock, "Ramp Clock", false);
+    toggle (ParamIDs::rampLoopMod, "Ramp Loop Modify", false);
+    toggle (ParamIDs::rampLength, "Ramp Length", false);
+    toggle (ParamIDs::bounce, "Bounce", true);
+    choice (ParamIDs::sweep, "Sweep", { "Knob is top", "Knob is bottom" }, 0);
+    layout.add (std::make_unique<P> (ParameterID { ParamIDs::rampSpeed, 1 }, "Ramp Speed", NormalisableRange<float> (0.0f, 1.0f), 0.4f,
+                                     AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+                                     {
+                                         const float hz = 0.05f * std::pow (200.0f, v);
+                                         return hz < 1.0f ? String (hz, 2) + " Hz" : String (hz, 1) + " Hz";
+                                     })));
+    layout.add (std::make_unique<P> (ParameterID { ParamIDs::rampWave, 1 }, "Ramp Waveform", NormalisableRange<float> (0.0f, 1.0f), 0.0f,
+                                     AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+                                     {
+                                         static const char* names[] = { "Triangle", "Square", "Sine", "Random", "Smooth random" };
+                                         return String (names[jlimit (0, 4, roundToInt (v * 4.0f))]);
+                                     })));
+    choice (ParamIDs::modSource, "Driven By", { "Ramp", "Expression" }, 0);
+    knob (ParamIDs::expression, "Expression", 0.0f);
+    choice (ParamIDs::expPolarity, "Expression Polarity", { "Normal", "Reversed" }, 0);
+
+    // ---- tempo ----
+    choice (ParamIDs::tempoSync, "Tempo Sync", { "Off", "Ableton", "Tap" }, 0);
+    layout.add (std::make_unique<P> (ParameterID { ParamIDs::tapBpm, 1 }, "Tap Tempo", NormalisableRange<float> (40.0f, 240.0f), 120.0f,
+                                     AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return String (roundToInt (v)) + " BPM"; })));
+
+    // ---- Synth Mode ----
+    toggle (ParamIDs::synthEnable, "Synth Mode", true);
+    choice (ParamIDs::synthGate, "Note Output", { "Drone", "Gate", "ADSR" }, 0); // the pedal drones by default
+    auto ms = [&] (const char* id, const char* name, float lo, float hi, float def)
+    {
+        layout.add (std::make_unique<P> (ParameterID { id, 1 }, name, NormalisableRange<float> (lo, hi, 0.0f, 0.35f), def,
+                                         AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+                                         {
+                                             return v < 1000.0f ? String (roundToInt (v)) + " ms" : String (v / 1000.0f, 2) + " s";
+                                         })));
+    };
+    ms (ParamIDs::attack, "Attack", 1.0f, 4000.0f, 40.0f);
+    ms (ParamIDs::decay, "Decay", 5.0f, 4000.0f, 300.0f);
+    knob (ParamIDs::sustain, "Sustain", 0.7f);
+    ms (ParamIDs::release, "Release", 5.0f, 8000.0f, 1200.0f);
+    ms (ParamIDs::glide, "Glide", 0.0f, 2000.0f, 80.0f);
+    layout.add (std::make_unique<AudioParameterInt> (ParameterID { ParamIDs::synthRoot, 1 }, "Original Pitch Note", 24, 96, 60,
+                                                     AudioParameterIntAttributes().withStringFromValueFunction ([] (int v, int)
+                                                     {
+                                                         return MidiMessage::getMidiNoteName (v, true, true, 4);
+                                                     })));
+
+    // ---- preset toggle ----
+    choice (ParamIDs::presetSlot, "Preset", { "A", "Live", "B" }, 1);
 
     return layout;
 }

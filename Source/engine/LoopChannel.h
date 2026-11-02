@@ -26,6 +26,7 @@ public:
         float width = 1.0f;
         float fade = 1.0f;      // 1 = loops keep forever while dubbing
         int capacity = 128000;  // circle size in core samples
+        float lengthFraction = 0.0f; // > 0: tempo-synced Tape length as a fraction of the loop
         float coreRate = 64000.0f;
     };
 
@@ -171,6 +172,19 @@ private:
                  buf[1][(size_t) a] + (buf[1][(size_t) b] - buf[1][(size_t) a]) * f };
     }
 
+    // MKII Stretch steps: no stretch, 1.5x, 2x, 4x stretch each way, stalled at noon
+    static float stretchSpeed (float cc)
+    {
+        if (cc < 15.5f)  return -1.0f;
+        if (cc < 30.5f)  return -1.0f / 1.5f;
+        if (cc < 46.5f)  return -0.5f;
+        if (cc < 60.5f)  return -0.25f;
+        if (cc < 80.5f)  return 0.0f;
+        if (cc < 96.5f)  return 0.25f;
+        if (cc < 111.5f) return 0.5f;
+        return 1.0f / 1.5f;
+    }
+
     static float tapeRate (float m)
     {
         static constexpr float rates[8] = { -4.0f, -2.0f, -1.0f, -0.5f, 0.5f, 1.0f, 2.0f, 4.0f };
@@ -205,7 +219,8 @@ private:
             case Tape:
             {
                 const float rate = tapeRate (p.modify);
-                const float win = std::max (64.0f, Lf * lerpf (0.03f, 1.0f, std::pow (p.length, 1.3f)));
+                const float win = std::max (64.0f, p.lengthFraction > 0.0f ? Lf * p.lengthFraction
+                                                                          : Lf * lerpf (0.03f, 1.0f, std::pow (p.length, 1.3f)));
 
                 if (refresh)
                 {
@@ -302,7 +317,8 @@ private:
                 G = std::min (G, Lf * 0.5f);
                 const float m = clampf (p.modify, 0, 1);
 
-                if (m >= 0.97f && ! p.classic && ! refresh)
+                const float cc = m * 127.0f; // the pedal's MIDI table for Stretch Modify
+                if (cc >= 126.5f && ! p.classic && ! refresh)
                 {
                     stretchC = wrapPos (stretchC + 1.0f, Lf);
                     v = readAt (stretchC);
@@ -310,8 +326,16 @@ private:
                 }
                 else
                 {
-                    float sp = clampf ((m - 0.5f) * 2.0f / 0.94f, -1.0f, 1.0f);
-                    sp = (sp < 0 ? -1.0f : 1.0f) * std::pow (std::fabs (sp), 1.5f);
+                    float sp;
+                    if (p.classic) // original MOOD: a continuous sweep, slower towards noon
+                    {
+                        sp = clampf ((m - 0.5f) * 2.0f / 0.94f, -1.0f, 1.0f);
+                        sp = (sp < 0 ? -1.0f : 1.0f) * std::pow (std::fabs (sp), 1.5f);
+                    }
+                    else
+                    {
+                        sp = stretchSpeed (cc);
+                    }
                     const float dir = (p.classic || sp >= 0.0f) ? 1.0f : -1.0f;
 
                     if (refresh) // grains come from the audio you just played

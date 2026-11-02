@@ -50,6 +50,8 @@ juce_add_plugin(Murmur
     COPY_PLUGIN_AFTER_BUILD FALSE
     VST3_CATEGORIES Fx Delay Reverb)
 
+juce_add_binary_data(MurmurData SOURCES Resources/RobotoCondensed-Bold.ttf)
+
 target_sources(Murmur PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp)
@@ -64,6 +66,7 @@ target_compile_definitions(Murmur PUBLIC
 
 target_link_libraries(Murmur
     PRIVATE
+        MurmurData
         juce::juce_audio_utils
         juce::juce_dsp
     PUBLIC
