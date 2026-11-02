@@ -1,8 +1,8 @@
 #pragma once
 
 // The Wet Channel: Reverb (multi-tap cluster smeared into a reverb), Delay
-// (clean, crossfaded time changes) and Slip (continuous auto-sampler / pitch
-// shifter), plus Freeze. All times are in CORE samples, so the global Clock
+// (clean, crossfaded time changes) and Slip (chunk delay that plays your last
+// phrase back reversed or pitched), plus Freeze. All times are in CORE samples, so the global Clock
 // stretches and pitches everything together.
 
 #include "DspUtil.h"
@@ -35,7 +35,7 @@ public:
         {
             tapLine[c].init (1 << 16);
             dly[c].init (1 << 17);
-            slipBuf[c].init (1 << 16);
+            slipBuf[c].init (1 << 18);
             hist[c].init (1 << 18);
             comb[c].init (1 << 14);
             for (auto& a : diff[c]) a.init (1 << 13);
@@ -60,7 +60,7 @@ public:
         for (auto& z : fdnLp) z = 0.0f;
         lastTap = {};
         dA = dB = dCur = 4096.0f; xfade = 0;
-        slipPhase = 0.0f; slipPan = 0.0f;
+        slipCur = {}; slipPrev = {}; slipCounter = 0.0f; slipPan = 0.0f;
         frozen = false; freezeGain = 0.0f; freezePos = 0.0f; freezeLen = 1024;
         for (auto& p : lfo) p = 0.0f;
     }
@@ -68,7 +68,7 @@ public:
     // ---- time mappings (core samples) -------------------------------------------------
     static float reverbSize (float t) { return 600.0f + 23400.0f * std::pow (clampf (t, 0, 1), 1.5f); }
     static float delaySamples (float t) { return 256.0f * std::pow (2.0f, clampf (t, 0, 1) * 8.8f); }
-    static float slipSize (float t) { return 128.0f * std::pow (2.0f, clampf (t, 0, 1) * 8.0f); }
+    static float slipSize (float t) { return 128.0f * std::pow (2.0f, clampf (t, 0, 1) * 9.0f); } // 2 ms to 1 s at 64 kHz
 
     // Slip / frozen-Slip playback speed: semitone steps, 2x reverse ... neutral ... 2x forward
     static float slipSpeed (float m)
@@ -150,7 +150,7 @@ private:
     }
     float sizeFor (const Params& p) const { return p.syncLen > 0 ? synced (p, 600, 24000) : reverbSize (p.time); }
     float delayFor (const Params& p) const { return p.syncLen > 0 ? synced (p, 16, 130000) : clampf (delaySamples (p.time), 16, 130000); }
-    float slipFor (const Params& p) const { return p.syncLen > 0 ? synced (p, 64, 32768) : clampf (slipSize (p.time), 64, 32768); }
+    float slipFor (const Params& p) const { return p.syncLen > 0 ? synced (p, 64, 65536) : clampf (slipSize (p.time), 64, 65536); }
 
     // ---- Reverb ------------------------------------------------------------------------
     Stereo reverb (Stereo in, const Params& p)
@@ -289,6 +289,63 @@ private:
     }
 
     // ---- Slip --------------------------------------------------------------------------
+    // Slip is a chunk delay. Every S samples (Time sets S, the "refresh rate") it grabs
+    // the chunk you just played and plays it back over the next S samples at the chosen
+    // speed and direction. At 1x forward it is a plain delay of S. Reverse gives reverse
+    // delay echoes, other speeds give pitched echoes that follow behind you. Small sizes
+    // refresh so fast that it behaves like a pitch shifter.
+    struct SlipPlayer
+    {
+        float age = 0;      // samples since this chunk started playing
+        float x = 0;        // read position inside the chunk (0 = its oldest sample)
+        float S = 1024;     // chunk length when captured
+        float F = 64;       // crossfade length
+        float retired = -1; // samples since being replaced (-1 = still current)
+        bool active = false;
+    };
+
+    void startChunk (float S, float speed, bool classic)
+    {
+        slipPrev = slipCur;
+        if (slipPrev.active) slipPrev.retired = 0.0f;
+        slipCur = {};
+        slipCur.active = true;
+        slipCur.S = S;
+        slipCur.F = classic ? std::min (16.0f, S * 0.25f) : std::min (512.0f, S * 0.25f);
+        slipCur.x = speed >= 0.0f ? 0.0f : S;
+        slipCounter = 0.0f;
+    }
+
+    // Read chunk position x of a player. delay = age + S - x puts x = 0 at the
+    // oldest sample of the chunk it captured.
+    float readChunk (const DelayLine& d, const SlipPlayer& pl, float x, bool classic) const
+    {
+        const float delay = std::max (1.0f, pl.age + pl.S - x);
+        return classic ? d.tapInt ((int) delay) : d.tap (delay);
+    }
+
+    Stereo playChunk (const SlipPlayer& pl, float speed, bool classic) const
+    {
+        Stereo v { readChunk (slipBuf[0], pl, pl.x, classic), readChunk (slipBuf[1], pl, pl.x, classic) };
+
+        // Faster than 1x the chunk loops inside itself, so crossfade across each wrap
+        if (std::fabs (speed) > 1.0f)
+        {
+            const float F = pl.F;
+            float k = 0.0f, alt = 0.0f;
+            if (speed > 0.0f && pl.x > pl.S - F) { k = (pl.x - (pl.S - F)) / F; alt = pl.x - pl.S; }
+            if (speed < 0.0f && pl.x < F)        { k = (F - pl.x) / F;          alt = pl.x + pl.S; }
+            if (k > 0.0f)
+            {
+                const Stereo w { readChunk (slipBuf[0], pl, alt, classic), readChunk (slipBuf[1], pl, alt, classic) };
+                v = v * (1.0f - k) + w * k;
+            }
+        }
+        return v;
+    }
+
+    static float fadeIn (float t) { const float s = std::sin (0.5f * kPi * clampf (t, 0, 1)); return s * s; }
+
     Stereo slip (Stereo in, const Params& p)
     {
         const float S = slipFor (p);
@@ -297,28 +354,28 @@ private:
         slipBuf[0].push (in.l);
         slipBuf[1].push (in.r);
 
-        slipPhase += (1.0f - speed) / S;
-        slipPhase -= std::floor (slipPhase);
-        const float p1 = slipPhase;
-        float p2 = p1 + 0.5f;
-        if (p2 >= 1.0f) p2 -= 1.0f;
-        const float d1 = 2.0f + p1 * S;
-        const float d2 = 2.0f + p2 * S;
+        slipCounter += 1.0f;
+        if (! slipCur.active || slipCounter >= S)
+            startChunk (S, speed, p.classic);
 
         Stereo o;
-        if (p.classic) // aliased and uneven: no interpolation, triangle windows
+        for (SlipPlayer* pl : { &slipCur, &slipPrev })
         {
-            const float w1 = 1.0f - std::fabs (2.0f * p1 - 1.0f);
-            const float w2 = 1.0f - std::fabs (2.0f * p2 - 1.0f);
-            o.l = slipBuf[0].tapInt ((int) d1) * w1 + slipBuf[0].tapInt ((int) d2) * w2;
-            o.r = slipBuf[1].tapInt ((int) d1) * w1 + slipBuf[1].tapInt ((int) d2) * w2;
-        }
-        else
-        {
-            const float s1 = std::sin (kPi * p1), s2 = std::sin (kPi * p2);
-            const float w1 = s1 * s1, w2 = s2 * s2;
-            o.l = slipBuf[0].tap (d1) * w1 + slipBuf[0].tap (d2) * w2;
-            o.r = slipBuf[1].tap (d1) * w1 + slipBuf[1].tap (d2) * w2;
+            if (! pl->active) continue;
+            float g = fadeIn (pl->age / pl->F);
+            if (pl->retired >= 0.0f)
+            {
+                g *= 1.0f - fadeIn (pl->retired / pl->F);
+                if (pl->retired >= pl->F) { pl->active = false; continue; }
+            }
+            o = o + playChunk (*pl, speed, p.classic) * g;
+
+            // advance
+            pl->age += 1.0f;
+            if (pl->retired >= 0.0f) pl->retired += 1.0f;
+            pl->x += speed;
+            if (std::fabs (speed) > 1.0f && (pl->x >= pl->S || pl->x < 0.0f))
+                pl->x -= std::floor (pl->x / pl->S) * pl->S;
         }
 
         if (p.spread) // smooth auto-pan, speed set by Time (and Clock)
@@ -399,7 +456,8 @@ private:
     float dA = 4096, dB = 4096, dCur = 4096;
     int xfade = 0;
 
-    float slipPhase = 0, slipPan = 0;
+    SlipPlayer slipCur, slipPrev;
+    float slipCounter = 0, slipPan = 0;
 
     std::vector<float> freezeBuf[2];
     bool frozen = false;
