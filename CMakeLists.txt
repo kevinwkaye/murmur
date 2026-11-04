@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Murmur VERSION 0.1.0 LANGUAGES C CXX)
+project(Murmur VERSION 0.2.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -81,4 +81,15 @@ option(MURMUR_BUILD_TESTS "Build the offline render test" ON)
 if(MURMUR_BUILD_TESTS)
     add_executable(murmur_render_test Tests/RenderTest.cpp)
     target_include_directories(murmur_render_test PRIVATE Source/engine)
+
+    add_executable(murmur_bench Tests/Benchmark.cpp)
+    target_include_directories(murmur_bench PRIVATE Source/engine)
+
+    # Plugin-level tests run the real processor and editor against a fake host
+    add_executable(murmur_plugin_test Tests/PluginTest.cpp)
+    target_include_directories(murmur_plugin_test PRIVATE Source Source/engine
+        $<TARGET_PROPERTY:Murmur,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(murmur_plugin_test PRIVATE $<TARGET_PROPERTY:Murmur,COMPILE_DEFINITIONS>)
+    target_compile_options(murmur_plugin_test PRIVATE $<TARGET_PROPERTY:Murmur,COMPILE_OPTIONS>)
+    target_link_libraries(murmur_plugin_test PRIVATE Murmur)
 endif()

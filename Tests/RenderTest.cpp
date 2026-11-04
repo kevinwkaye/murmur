@@ -5,6 +5,7 @@
 // Usage: murmur_render_test [output_folder]
 
 #include "MurmurEngine.h"
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 #include <string>
@@ -12,6 +13,111 @@
 using namespace murmur;
 
 static constexpr float kFs = 48000.0f;
+
+// ---- Pitch range: every Slip and Tape MODIFY step plays at the right pitch and direction ----
+static float zeroCrossHz (const std::vector<float>& x, int from, int to)
+{
+    double first = -1, last = -1;
+    int n = 0;
+    for (int i = from + 1; i < to; ++i)
+        if (x[(size_t) i - 1] < 0 && x[(size_t) i] >= 0)
+        {
+            const double t = i - 1 + (-x[(size_t) i - 1]) / (x[(size_t) i] - x[(size_t) i - 1]);
+            if (first < 0) first = t;
+            last = t;
+            ++n;
+        }
+    return n > 1 ? (float) ((n - 1) * kFs / (last - first)) : 0.0f;
+}
+
+// Median of many short-window estimates, so windows that straddle a Slip chunk crossfade don't skew it
+static float measureHz (const std::vector<float>& x, int from, int to)
+{
+    std::vector<float> est;
+    for (int s = from; s + 2400 < to; s += 600)
+        if (const float f = zeroCrossHz (x, s, s + 2400); f > 0.0f)
+            est.push_back (f);
+    if (est.empty()) return 0.0f;
+    std::nth_element (est.begin(), est.begin() + (long) est.size() / 2, est.end());
+    return est[est.size() / 2];
+}
+
+// Plays a 220 Hz sine (for pitch) and then a rising ramp (for direction) through one setting.
+template <typename SetUp>
+static void probe (SetUp setUp, int captureAt, float& semis, bool& reversed)
+{
+    const int N = (int) (kFs * 3.0f);
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        MurmurEngine e;
+        e.prepare (kFs);
+        EngineParams p;
+        p.mix = 1.0f;
+        p.dryKill = true;
+        std::vector<float> l ((size_t) N), r ((size_t) N);
+        for (int i = 0; i < N; ++i)
+            l[(size_t) i] = r[(size_t) i] = pass == 0 ? 0.3f * std::sin (kTwoPi * 220.0f * (float) i / kFs)
+                                                       : 0.5f * (float) (i % 4096) / 4096.0f;
+        for (int i = 0; i < N; i += 64)
+        {
+            setUp (p, i >= captureAt);
+            e.process (l.data() + i, r.data() + i, std::min (64, N - i), p);
+        }
+        if (pass == 0)
+        {
+            semis = 12.0f * std::log2 (measureHz (l, (int) (1.8f * kFs), (int) (2.9f * kFs)) / 220.0f);
+        }
+        else
+        {
+            // count rising against falling sample-to-sample steps, ignoring the ramp's resets
+            int up = 0, down = 0;
+            for (int i = (int) (1.8f * kFs); i < (int) (2.9f * kFs); ++i)
+            {
+                const float d = l[(size_t) i] - l[(size_t) i - 1];
+                if (std::fabs (d) < 0.01f) { if (d > 0) ++up; else if (d < 0) ++down; }
+            }
+            reversed = down > up;
+        }
+    }
+}
+
+static int pitchRangeTests()
+{
+    int fails = 0;
+    std::printf ("\nSlip MODIFY steps (expect reverse +12..-12 then forward -12..+12)\n");
+    for (int i = 0; i < WetChannel::kSlipSteps; ++i)
+    {
+        const float m = ((float) i + 0.5f) / (float) WetChannel::kSlipSteps;
+        const auto want = WetChannel::slipStep (m);
+        const int wantSemis = i < 25 ? 12 - i : i - 37;
+        const bool wantRev = i < 25;
+        float semis = 0;
+        bool rev = false;
+        probe ([m] (EngineParams& p, bool) { p.wetOn = true; p.wetMode = 2; p.time = 0.95f; p.wetModify = m; }, 0, semis, rev);
+        const bool ok = want.semis == wantSemis && want.reverse == wantRev
+                        && std::fabs (semis - (float) wantSemis) < 0.3f && rev == wantRev;
+        if (! ok) ++fails;
+        std::printf ("  step %2d  %s %+3d st  measured %+6.2f st %s%s\n", i, wantRev ? "REV" : "FWD", wantSemis, semis,
+                     rev ? "reversed" : "forwards", ok ? "" : "   <- FAIL");
+    }
+
+    std::printf ("\nTape MODIFY steps (expect reverse 4x 2x 1x 0.5x, forward 0.5x 1x 2x 4x)\n");
+    const float rates[8] = { -4, -2, -1, -0.5f, 0.5f, 1, 2, 4 };
+    for (int i = 0; i < 8; ++i)
+    {
+        const float m = ((float) i + 0.5f) / 8.0f;
+        float semis = 0;
+        bool rev = false;
+        probe ([m] (EngineParams& p, bool play) { p.loopOn = play; p.loopMode = 1; p.loopModify = m; p.length = 1.0f; },
+               (int) (1.2f * kFs), semis, rev);
+        const float want = 12.0f * std::log2 (std::fabs (rates[i]));
+        const bool ok = LoopChannel::tapeRate (m) == rates[i] && std::fabs (semis - want) < 0.3f && rev == (rates[i] < 0);
+        if (! ok) ++fails;
+        std::printf ("  step %d  %+.1fx  measured %+6.2f st %s%s\n", i, rates[i], semis, rev ? "reversed" : "forwards",
+                     ok ? "" : "   <- FAIL");
+    }
+    return fails;
+}
 
 // A simple plucked-note phrase: a few notes, then silence
 static void makeInput (std::vector<float>& l, std::vector<float>& r, int n)
@@ -182,6 +288,8 @@ int main (int argc, char** argv)
         p.wetOn = true; p.wetMode = 0; p.wetModify = 0.8f; p.synthGate = 0; p.glide = 0.3f;
         if (t > 2.0f && t < 2.01f) g_eng->synthNoteOn (48, 1.0f);
         if (t > 4.0f && t < 4.01f) g_eng->synthNoteOn (60, 1.0f); }, out));
+
+    failures += pitchRangeTests();
 
     std::printf ("\n%s (%d failures)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures);
     return failures == 0 ? 0 : 1;

@@ -27,6 +27,25 @@ namespace ui
 {
 static double nowSeconds() { return Time::getMillisecondCounterHiRes() * 0.001; }
 
+String intervalName (int semis)
+{
+    static const char* names[13] = { "UNISON", "MIN 2ND", "2ND", "MIN 3RD", "3RD", "4TH", "TRITONE",
+                                     "5TH", "MIN 6TH", "6TH", "MIN 7TH", "7TH", "OCT" };
+    const String minus = "-"; // the Flip Fella font has no true minus glyph
+    const int a = std::abs (semis);
+    if (a == 0) return "UNISON";
+    const String sign = semis > 0 ? "+" : minus;
+    if (a == 24) return sign + "2 OCT";
+    return sign + names[jlimit (0, 12, a)];
+}
+
+String stepText (int semis, bool reverse)
+{
+    const String minus = "-";
+    const String num = semis > 0 ? "+" + String (semis) : (semis < 0 ? minus + String (-semis) : String ("0"));
+    return String (reverse ? "REV " : "FWD ") + intervalName (semis) + " " + num;
+}
+
 // =====================================================================================
 // FlipCard
 // =====================================================================================
@@ -95,8 +114,9 @@ void FlipCard::paint (Graphics& g)
         else              drawHalf (g, card, current, false, (eased - 0.5f) * 2.0f, true);
     }
 
-    g.setColour (Colours::black);
-    g.fillRect (card.getX(), card.getCentreY() - 1.5f, card.getWidth(), 3.0f);
+    const float hinge = card.getHeight() < 36.0f ? 1.0f : 3.0f;
+    g.setColour (Colours::black.withAlpha (card.getHeight() < 36.0f ? 0.7f : 1.0f));
+    g.fillRect (card.getX(), card.getCentreY() - hinge * 0.5f, card.getWidth(), hinge);
     g.setColour (ff::pin);
     g.fillRoundedRectangle (outer.getX() + 1.0f, card.getCentreY() - 6.0f, 3.0f, 12.0f, 1.0f);
     g.fillRoundedRectangle (outer.getRight() - 4.0f, card.getCentreY() - 6.0f, 3.0f, 12.0f, 1.0f);
@@ -298,18 +318,29 @@ Dial::Dial (AudioProcessorValueTreeState& s, const String& paramId, const String
     addAndMakeVisible (slider);
     attachment = std::make_unique<AudioProcessorValueTreeState::SliderAttachment> (s, paramId, slider);
     slider.onValueChange = [this] { repaint(); };
+    stepCard.setTextHeight (17.0f);
+    addChildComponent (stepCard);
+}
+
+void Dial::setStepCard (const String& text)
+{
+    const bool show = text.isNotEmpty();
+    if (show) stepCard.setValue (text);
+    if (stepCard.isVisible() != show) { stepCard.setVisible (show); repaint(); }
 }
 
 void Dial::resized()
 {
-    slider.setBounds (getLocalBounds().withTrimmedTop (20).withTrimmedBottom (24).withSizeKeepingCentre (80, 80));
+    slider.setBounds (getLocalBounds().withTrimmedTop (20).withTrimmedBottom (34).withSizeKeepingCentre (80, 80));
+    stepCard.setBounds (getLocalBounds().removeFromBottom (32).withSizeKeepingCentre (getWidth(), 32));
 }
 
 void Dial::paint (Graphics& g)
 {
     auto r = getLocalBounds();
     ff::label (g, caption.toUpperCase(), r.removeFromTop (18), Justification::centred);
-    ff::label (g, param->getCurrentValueAsText().toUpperCase(), r.removeFromBottom (20), Justification::centred, ff::ink, 15.0f);
+    if (! stepCard.isVisible())
+        ff::label (g, param->getCurrentValueAsText().toUpperCase(), r.removeFromBottom (20), Justification::centred, ff::ink, 15.0f);
 
     // While ramping or expression moves this knob, a red dot shows where it really is
     if (modActive)
@@ -1051,14 +1082,14 @@ void MurmurEditor::resized()
 
         wetCard.setBounds (36, 120, 268, 84);
         wetMode.setBounds (36, 216, 268, 32);
-        time.setBounds (40, 262, 110, 128);
-        wetModify.setBounds (190, 262, 110, 128);
+        time.setBounds (30, 258, 130, 146);
+        wetModify.setBounds (180, 258, 130, 146);
         wetSwitch.setBounds (36, 428, 268, 64);
 
         loopCard.setBounds (656, 120, 268, 84);
         loopMode.setBounds (656, 216, 268, 32);
-        length.setBounds (660, 262, 110, 128);
-        loopModify.setBounds (810, 262, 110, 128);
+        length.setBounds (650, 258, 130, 146);
+        loopModify.setBounds (800, 258, 130, 146);
         loopSwitch.setBounds (656, 428, 268, 64);
 
         rateCard.setBounds (403, 116, 84, 56);
@@ -1168,6 +1199,27 @@ void MurmurEditor::timerCallback()
         mod (length, ParamIDs::rampLength, ParamIDs::length, eng.uiLength);
         mod (loopModify, ParamIDs::rampLoopMod, ParamIDs::loopModify, eng.uiLoopMod);
 
+        // Slip and Tape show their speed step on a flip card: direction, interval name and semitones.
+        // When ramping or expression moves the knob, the card follows where it really is.
+        auto actual = [&] (const char* rampId, const char* knobId, const std::atomic<float>& moved)
+        {
+            return s.getRawParameterValue (rampId)->load() > 0.5f ? moved.load() : s.getRawParameterValue (knobId)->load();
+        };
+        if (wm == 2)
+        {
+            const auto st = murmur::WetChannel::slipStep (actual (ParamIDs::rampWetMod, ParamIDs::wetModify, eng.uiWetMod));
+            wetModify.setStepCard (ui::stepText (st.semis, st.reverse));
+        }
+        else wetModify.setStepCard ({});
+        if (lm == 1)
+        {
+            const float rate = murmur::LoopChannel::tapeRate (actual (ParamIDs::rampLoopMod, ParamIDs::loopModify, eng.uiLoopMod));
+            loopModify.setStepCard (ui::stepText (roundToInt (12.0f * std::log2 (std::abs (rate))), rate < 0.0f));
+        }
+        else loopModify.setStepCard ({});
+        for (auto* d : { &time, &wetModify, &length, &loopModify })
+            d->advance (dt);
+
         // Clock cards and the musical interval
         const float hz = eng.uiClockHz.load();
         const float k = hz / 1000.0f;
@@ -1196,10 +1248,12 @@ void MurmurEditor::timerCallback()
         loopSwitch.repaint();
         repaint (340, 360, 280, 30);
     }
-    else if (page == 2)
+    // The tempo card always tracks the running tempo, whichever page is open
+    const float bpm = proc.currentBpm();
+    bpmCard.setValue (bpm > 0.0f ? String (roundToInt (bpm)) : "--");
+
+    if (page == 2)
     {
-        const float bpm = proc.currentBpm();
-        bpmCard.setValue (bpm > 0.0f ? String (roundToInt (bpm)) : "--");
         if (eng.isSynthActive())
         {
             const int n = eng.synthNote();

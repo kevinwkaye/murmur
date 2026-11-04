@@ -31,11 +31,18 @@ void label (juce::Graphics&, const juce::String& text, juce::Rectangle<int> r,
 
 namespace ui
 {
+// "+5TH", "−OCT", "UNISON": the interval for a number of semitones
+juce::String intervalName (int semis);
+// "REV −OCT −12": what a Slip or Tape speed step shows on its flip card
+juce::String stepText (int semis, bool reverse);
+
 // A split-flap card that flips like the Karlsson clock when its value changes.
 class FlipCard : public juce::Component
 {
 public:
     void setValue (const juce::String& v);
+    const juce::String& getValue() const { return current; }
+    bool isFlipping() const { return progress < 1.0f; }
     void setTextHeight (float h) { textHeight = h; }
     void advance (double dt);
     void paint (juce::Graphics&) override;
@@ -98,10 +105,15 @@ public:
     Dial (juce::AudioProcessorValueTreeState&, const juce::String& paramId, const juce::String& caption);
     void setCaption (const juce::String& c) { if (c != caption) { caption = c; repaint(); } }
     void setModulated (float position, bool active) { modPos = position; modActive = active; }
+    // Shows the value on a small flip card instead of plain text (Slip and Tape steps). Empty = plain text.
+    void setStepCard (const juce::String& text);
+    const juce::String& getStepCard() const { return stepCard.getValue(); }
+    void advance (double dt) { stepCard.advance (dt); }
     void paint (juce::Graphics&) override;
     void resized() override;
 
 private:
+    FlipCard stepCard;
     juce::Slider slider;
     juce::RangedAudioParameter* param = nullptr;
     juce::String caption;
@@ -226,9 +238,15 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
+    // Used by the plugin tests: run one display refresh and read what the cards show.
+    void refreshNow() { timerCallback(); }
+    void showPage (int);
+    const ui::FlipCard& tempoCard() const { return bpmCard; }
+    const ui::Dial& wetModifyDial() const { return wetModify; }
+    const ui::Dial& loopModifyDial() const { return loopModify; }
+
 private:
     void timerCallback() override;
-    void showPage (int);
     void section (juce::Graphics&, juce::Rectangle<int>) const;
 
     MurmurProcessor& proc;

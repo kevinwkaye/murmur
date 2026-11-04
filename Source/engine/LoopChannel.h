@@ -185,11 +185,14 @@ private:
         return 1.0f / 1.5f;
     }
 
+public:
+    // Tape MODIFY, as on the MOOD MKII: octave steps, reverse 4x 2x 1x 0.5x, forward 0.5x 1x 2x 4x
     static float tapeRate (float m)
     {
         static constexpr float rates[8] = { -4.0f, -2.0f, -1.0f, -0.5f, 0.5f, 1.0f, 2.0f, 4.0f };
-        return rates[(int) (clampf (m, 0, 1) * 7.999f)];
+        return rates[std::min (7, (int) (clampf (m, 0, 1) * 8.0f))];
     }
+private:
 
     // Where the player is right now, in loop samples (used to place the record head)
     float currentPos (int mode) const

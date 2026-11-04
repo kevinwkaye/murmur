@@ -1,13 +1,18 @@
-# Murmur v0.2
+# Murmur v0.2.1
 
 A stereo VST3 inspired by the way a certain two-channel ambient pedal behaves: an always-listening micro-looper, a Wet Channel of spatial effects, and a Clock that resamples everything in musical steps. All DSP here is original code written from public descriptions of the pedal's behaviour.
+
+## What's new in v0.2.1
+
+- **Tempo display follows Sync.** The tempo card now always shows the tempo Murmur is running at. It changes the moment you switch Sync on or off, follows Ableton's tempo, and is right when a set loads with Sync on.
+- **Slip and Tape pitch match the MOOD MKII.** Slip's Modify runs reverse on the left half and forward on the right, each with every semitone from half speed (-12) to double speed (+12). Tape's Modify has the eight octave steps. A flip card under Modify shows the step, for example FWD +5TH +7.
 
 ## What's in v0.2
 
 | Area | Included |
 | --- | --- |
 | Clock | 2 kHz to 64 kHz engine rate. Default steps copy the pedal's 11 stops (64, 48, 32, 24, 16, 12, 8, 6, 4, 3, 2 kHz). Octave, fourths and fifths, semitone and Smooth options |
-| Wet Channel | Reverb (multi-tap cluster smeared into a reverb), Delay (clean time jumps, ping-pong that mirrors your panning), Slip (chunk delay: echoes play back pitched or reversed), Freeze for each |
+| Wet Channel | Reverb (multi-tap cluster smeared into a reverb), Delay (clean time jumps, ping-pong that mirrors your panning), Slip (chunk delay: echoes play back pitched or reversed, -12 to +12 semitones either way), Freeze for each |
 | Micro-Looper | Always listening, Env, Tape and Stretch (the MKII's stepped speeds), overdub, fade, Refresh (No Dub) |
 | Interaction | Routing (In, Both, Loop), the looper records the Wet Channel while listening, Direct micro-loop blend, Channel Sync both ways |
 | Footswitches | Tap to switch a channel on or off, hold to freeze (Wet) or overdub (Loop). Latch makes hold a toggle |

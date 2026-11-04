@@ -71,14 +71,23 @@ public:
     static float delaySamples (float t) { return 256.0f * std::pow (2.0f, clampf (t, 0, 1) * 8.8f); }
     static float slipSize (float t) { return 128.0f * std::pow (2.0f, clampf (t, 0, 1) * 9.0f); } // 2 ms to 1 s at 64 kHz
 
-    // Slip / frozen-Slip playback speed: semitone steps, 2x reverse ... neutral ... 2x forward
+    // Slip MODIFY, as on the MOOD MKII: playback speed and direction in semitone steps.
+    // Left half plays reversed, right half forwards. Each half has all 25 steps from
+    // half speed (-12) to double speed (+12): fully left is 2x reverse, noon is the
+    // half-speed edge between the two halves, fully right is 2x forward.
+    struct SlipStep { int semis = 0; bool reverse = false; };
+    static constexpr int kSlipSteps = 50;
+    static SlipStep slipStep (float m)
+    {
+        const int i = std::min (kSlipSteps - 1, (int) (clampf (m, 0, 1) * (float) kSlipSteps));
+        if (i < kSlipSteps / 2) return { 12 - i, true };          // 0..24  -> reverse +12 .. -12
+        return { i - (kSlipSteps / 2 + 12), false };              // 25..49 -> forward -12 .. +12
+    }
     static float slipSpeed (float m)
     {
-        const int n = (int) std::lround ((clampf (m, 0, 1) * 2.0f - 1.0f) * 24.0f);
-        if (n == 0)
-            return 1.0f;
-        const float mag = std::pow (2.0f, (float) (std::abs (n) - 12) / 12.0f);
-        return n > 0 ? mag : -mag;
+        const auto st = slipStep (m);
+        const float mag = std::pow (2.0f, (float) st.semis / 12.0f);
+        return st.reverse ? -mag : mag;
     }
 
     // Length of the current Time setting in core samples (used for channel sync)

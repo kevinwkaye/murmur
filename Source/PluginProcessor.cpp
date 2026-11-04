@@ -78,22 +78,13 @@ void MurmurProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& midi
 
     auto p = readParams();
 
-    // Tempo: Ableton's tempo, your tapped tempo, or none
-    float bpm = 0.0f;
-    const int sync = idx (ParamIDs::tempoSync);
-    if (sync == 1)
-    {
-        if (auto* ph = getPlayHead())
-            if (auto pos = ph->getPosition())
-                if (auto b = pos->getBpm())
-                    bpm = (float) *b;
-    }
-    else if (sync == 2)
-    {
-        bpm = f (ParamIDs::tapBpm);
-    }
-    p.bpm = bpm;
-    uiBpm.store (bpm);
+    // Remember Ableton's tempo on every block, whatever the Sync setting, so the
+    // moment Sync turns on both the engine and the display already know it.
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+            if (auto b = pos->getBpm())
+                hostBpm.store ((float) *b);
+    p.bpm = currentBpm();
 
     // Synth Mode ends when you move the Clock, like the pedal
     if (lastClock >= 0.0f && std::abs (p.clock - lastClock) > 0.004f && engine.isSynthActive())
@@ -234,6 +225,11 @@ void MurmurProcessor::setNow (const String& id, float plainValue)
 // ---- message thread housekeeping ----
 void MurmurProcessor::timerCallback()
 {
+    applyPendingChanges();
+}
+
+void MurmurProcessor::applyPendingChanges()
+{
     // MIDI CC changes
     const auto scope = fifo.read (fifo.getNumReady());
     auto apply = [this] (int start, int size)
@@ -342,6 +338,17 @@ void MurmurProcessor::resetHiddenOptions()
             p->setValueNotifyingHost (p->getDefaultValue());
             p->endChangeGesture();
         }
+}
+
+float MurmurProcessor::currentBpm() const
+{
+    // The one place that decides the tempo Murmur runs at: the engine and the display both ask here.
+    switch (idx (ParamIDs::tempoSync))
+    {
+        case 1:  return hostBpm.load();          // Ableton (0 until Ableton has reported a tempo)
+        case 2:  return f (ParamIDs::tapBpm);    // tap tempo
+        default: return 0.0f;                    // not synced
+    }
 }
 
 void MurmurProcessor::tapTempo()

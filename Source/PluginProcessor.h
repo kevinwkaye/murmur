@@ -42,7 +42,11 @@ public:
     void savePresetSlot (int slot);           // 0 = A, 2 = B, like holding the pedal's footswitches
     bool hasPresetSlot (int slot) const;
     void resetHiddenOptions();
-    float currentBpm() const { return uiBpm.load(); } // 0 when not synced
+    float currentBpm() const; // the tempo Murmur runs at, 0 when not synced (safe on any thread)
+
+    // Applies MIDI CC changes, taps and preset switches queued by the audio thread.
+    // The 30 Hz timer calls it; tests call it directly.
+    void applyPendingChanges();
 
 private:
     void timerCallback() override;
@@ -69,7 +73,7 @@ private:
     std::map<juce::String, int> paramIndex;
 
     std::atomic<int> pendingTaps { 0 }, pendingProgram { -1 };
-    std::atomic<float> uiBpm { 0.0f };
+    std::atomic<float> hostBpm { 0.0f }; // Ableton's last reported tempo
     juce::Array<double> tapTimes;
     float lastClock = -1.0f;
     int lastSlot = 1;
