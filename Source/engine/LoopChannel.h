@@ -5,13 +5,14 @@
 // measured in CORE samples, so the Clock sets the loop length and resolution.
 
 #include "DspUtil.h"
+#include "MurkLoop.h"
 
 namespace murmur
 {
 class LoopChannel
 {
 public:
-    enum Mode { Env = 0, Tape = 1, Stretch = 2 };
+    enum Mode { Env = 0, Tape = 1, Stretch = 2, Burst = 3, Radio = 4, Mask = 5 }; // 3 to 5 are Murk's
 
     struct Params
     {
@@ -28,6 +29,9 @@ public:
         int capacity = 128000;  // circle size in core samples
         float lengthFraction = 0.0f; // > 0: tempo-synced Tape length as a fraction of the loop
         float coreRate = 64000.0f;
+        float beat = 0.0f;           // core samples per beat when tempo synced
+        bool recording = false;      // footswitch B: record a fresh loop from silence
+        int recordCapacity = 0;      // the longest a recording can be, core samples
     };
 
     void prepare (int maxCapacity)
@@ -47,6 +51,8 @@ public:
         for (auto& g : grains) g = {};
         panPh = 0; gate = 1; lastReadIdx = -1; uiPos = 0;
         dubbing = false; recPos = 0; refreshOff = 0;
+        recording = false; recordFull = false; fresh = false;
+        murk.reset();
     }
 
     // envIn: live input for Env detection. rec: what the listening buffer records
@@ -59,11 +65,33 @@ public:
         const float rel = std::exp (-1.0f / (0.060f * p.coreRate));
         env = lvl > env ? lvl + atk * (env - lvl) : lvl + rel * (env - lvl);
 
-        if (p.playing && ! playing) capture();
+        // Recording: start a fresh loop from silence and keep everything until it's closed
+        if (p.recording && ! recording && ! p.playing && ! playing)
+        {
+            C = std::min (std::max (p.recordCapacity, 1024), maxCap);
+            w = 0; filled = 0; recordFull = false; fresh = true;
+        }
+        recording = p.recording && ! p.playing;
+
+        if (p.playing && ! playing) capture (p);
         if (! p.playing && playing) release();
         playing = p.playing;
 
         playGain += clampf ((playing ? 1.0f : 0.0f) - playGain, -1.0f / 256.0f, 1.0f / 256.0f);
+
+        if (! playing && recording)
+        {
+            if (filled < C)
+            {
+                buf[0][(size_t) w] = rec.l;
+                buf[1][(size_t) w] = rec.r;
+                ++w;
+                filled = w;
+            }
+            else recordFull = true;   // the processor closes the loop and starts playing it
+            playGain = 0.0f;
+            return {};
+        }
 
         if (! playing)
         {
@@ -97,14 +125,35 @@ public:
     int origin() const { return playing ? start : w; }
     int filledSamples() const { return playing ? L : filled; }
     float positionFraction() const { return L > 0 ? uiPos / (float) L : 0.0f; }
+    bool isRecording() const { return recording; }
+    bool recordingFull() const { return recordFull; }
+    int burstFill() const { return murk.uiFill; }
     const float* data (int ch) const { return buf[ch].data(); }
 
 private:
     struct Grain { float startPos = 0, age = 0, len = 0; float dir = 1; bool active = false; };
 
-    void capture()
+    void capture (const Params& p)
     {
-        if (filled >= C)
+        if (fresh)
+        {
+            // A recorded loop runs from where recording began. Tempo synced, it rounds to
+            // the nearest whole beat; any time added past the end is silence.
+            fresh = false;
+            L = std::max (filled, 512);
+            if (p.beat > 64.0f && (float) L > p.beat * 0.5f)
+            {
+                const int rounded = (int) (std::max (1.0f, std::round ((float) L / p.beat)) * p.beat);
+                const int target = std::min (rounded, maxCap);
+                for (int i = L; i < target; ++i) buf[0][(size_t) i] = buf[1][(size_t) i] = 0.0f;
+                L = target;
+            }
+            start = 0;
+            C = std::max (C, L);
+            filled = L;
+            w = 0;
+        }
+        else if (filled >= C)
         {
             L = C;           // the whole circle, oldest sample first
             start = w;
@@ -135,6 +184,10 @@ private:
         for (auto& g : grains) g = {};
         lastReadIdx = -1;
         dubbing = false;
+
+        if (p.mode == Burst)
+            murk.analyse (L, [this] (int i) { return std::max (std::fabs (buf[0][(size_t) phys (i)]), std::fabs (buf[1][(size_t) phys (i)])); });
+        murkAnalysed = p.mode == Burst;
     }
 
     void release()
@@ -199,6 +252,7 @@ private:
     {
         if (mode == Tape) return tapePos;
         if (mode == Env) return held ? sliceStart + intra : envPos;
+        if (mode >= Burst) return murk.uiPos;
         return stretchC;
     }
 
@@ -314,6 +368,24 @@ private:
                 break;
             }
 
+            case Burst:
+            case Radio:
+            case Mask:
+            {
+                if (p.mode == Burst && ! murkAnalysed) // switched to Burst while the loop plays
+                {
+                    murk.analyse (L, [this] (int i) { return std::max (std::fabs (buf[0][(size_t) phys (i)]), std::fabs (buf[1][(size_t) phys (i)])); });
+                    murkAnalysed = true;
+                }
+                MurkLoop::Params mp;
+                mp.length = p.length; mp.modify = p.modify; mp.coreRate = p.coreRate;
+                mp.beat = p.beat; mp.spread = p.spread; mp.width = p.width;
+                v = murk.process (p.mode - Burst, Lf, env, mp, [this] (float x) { return readAt (x); });
+                idx = (int) murk.uiPos;
+                uiPos = murk.uiPos;
+                break;
+            }
+
             default: // Stretch
             {
                 float G = std::max (64.0f, Lf * lerpf (0.004f, 0.35f, std::pow (p.length, 1.5f)));
@@ -426,6 +498,9 @@ private:
 
     float panPh = 0, gate = 1, uiPos = 0;
     int lastReadIdx = -1;
+
+    bool recording = false, recordFull = false, fresh = false, murkAnalysed = false;
+    MurkLoop murk;
     Rng rng;
 };
 } // namespace murmur

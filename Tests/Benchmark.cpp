@@ -51,22 +51,30 @@ struct Scene { std::string name; std::function<void (EngineParams&, double)> set
 int main()
 {
     const std::vector<Scene> scenes {
-        { "Classic, idle (both channels off)", [] (EngineParams& p, double) { p.wetOn = false; p.loopOn = false; } },
-        { "Classic, reverb only", [] (EngineParams& p, double) { p.wetOn = true; p.wetMode = 0; p.wetModify = 0.7f; } },
-        { "Classic, slip + tape loop", [] (EngineParams& p, double t) { p.wetOn = true; p.wetMode = 2; p.time = 0.7f; p.loopOn = t > 3; p.loopMode = 1; } },
-        { "Classic, busy (reverb, stretch, spread, ramping)", [] (EngineParams& p, double t) {
+        { "Murmur, idle (both channels off)", [] (EngineParams& p, double) { p.wetOn = false; p.loopOn = false; } },
+        { "Murmur, reverb only", [] (EngineParams& p, double) { p.wetOn = true; p.wetMode = 0; p.wetModify = 0.7f; } },
+        { "Murmur, slip + tape loop", [] (EngineParams& p, double t) { p.wetOn = true; p.wetMode = 2; p.time = 0.7f; p.loopOn = t > 3; p.loopMode = 1; } },
+        { "Murmur, busy (reverb, stretch, spread, ramping)", [] (EngineParams& p, double t) {
               p.wetOn = true; p.wetMode = 0; p.wetModify = 0.8f; p.loopOn = t > 3; p.loopMode = 2; p.loopModify = 0.6f;
               p.spread = true; p.rampLoopMod = true; p.bounce = true; } },
+        { "Murk, idle (both channels off, Glue on)", [] (EngineParams& p, double) { p.mode = 1; p.wetOn = false; p.loopOn = false; } },
+        { "Murk, soup only", [] (EngineParams& p, double) { p.mode = 1; p.wetOn = true; p.murkWet = 0; p.wetModify = 0.6f; } },
+        { "Murk, relay (16 repeats) + radio loop", [] (EngineParams& p, double t) { p.mode = 1; p.wetOn = true; p.murkWet = 1; p.wetModify = 0.95f; p.loopOn = t > 3; p.murkLoop = 1; p.loopModify = 0.4f; } },
+        { "Murk, flip (4 voices) + mask loop", [] (EngineParams& p, double t) { p.mode = 1; p.wetOn = true; p.murkWet = 2; p.wetModify = 1.0f; p.loopOn = t > 3; p.murkLoop = 2; p.loopModify = 0.8f; } },
+        { "Murk, busy (soup, burst, glue, cross, spread)", [] (EngineParams& p, double t) {
+              p.mode = 1; p.wetOn = true; p.murkWet = 0; p.wetModify = 0.8f; p.loopOn = t > 3; p.murkLoop = 0; p.loopModify = 0.7f;
+              p.glue = 0.8f; p.cross = 0.7f; p.eqTilt = 0.4f; p.spread = true; p.rampLoopMod = true; } },
     };
 
     // Worst case: Synth Mode an octave above the original pitch runs the engine at 128 kHz
-    auto synthWorst = [] (int block)
+    auto synthWorst = [] (int block, int mode)
     {
         MurmurEngine e;
         e.prepare (kFs);
         e.synthNoteOn (72, 1.0f);
         EngineParams p;
         p.wetOn = true; p.wetMode = 0; p.wetModify = 0.8f; p.loopOn = true; p.loopMode = 2; p.spread = true;
+        p.mode = mode; p.murkWet = 0; p.murkLoop = 1; p.glue = 0.8f; p.cross = 0.5f;
         std::vector<float> l ((size_t) block, 0.1f), r ((size_t) block, 0.1f);
         const int blocks = (int) (kSeconds * kFs / block);
         const auto start = std::chrono::steady_clock::now();
@@ -78,6 +86,7 @@ int main()
     std::printf ("%-52s %10s %10s\n", "Scenario", "64 smp", "128 smp");
     for (const auto& s : scenes)
         std::printf ("%-52s %9.2f%% %9.2f%%\n", s.name.c_str(), cpuPercent (64, s.set), cpuPercent (128, s.set));
-    std::printf ("%-52s %9.2f%% %9.2f%%\n", "Classic, worst case (Synth Mode +1 oct, 128 kHz)", synthWorst (64), synthWorst (128));
+    std::printf ("%-52s %9.2f%% %9.2f%%\n", "Murmur, worst case (Synth Mode +1 oct, 128 kHz)", synthWorst (64, 0), synthWorst (128, 0));
+    std::printf ("%-52s %9.2f%% %9.2f%%\n", "Murk, worst case (Synth Mode +1 oct, 128 kHz)", synthWorst (64, 1), synthWorst (128, 1));
     return 0;
 }

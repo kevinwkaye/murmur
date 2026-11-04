@@ -42,6 +42,22 @@ static float measureHz (const std::vector<float>& x, int from, int to)
     return est[est.size() / 2];
 }
 
+// The strongest frequency in a stretch, by scanning a fine grid of single-bin DFTs.
+// Steadier than zero crossings on pitch-shifted audio, whose crossfades wobble the phase.
+static float peakHz (const std::vector<float>& x, int from, int to, float lo = 40.0f, float hi = 2000.0f)
+{
+    float best = 0.0f, bestMag = -1.0f;
+    for (float f = lo; f < hi; f *= 1.002f)
+    {
+        const double w = 2.0 * 3.14159265358979 * f / kFs;
+        double re = 0, im = 0;
+        for (int i = from; i < to; i += 2) { re += x[(size_t) i] * std::cos (w * i); im += x[(size_t) i] * std::sin (w * i); }
+        const double m = re * re + im * im;
+        if (m > bestMag) { bestMag = (float) m; best = f; }
+    }
+    return best;
+}
+
 // Plays a 220 Hz sine (for pitch) and then a rising ramp (for direction) through one setting.
 template <typename SetUp>
 static void probe (SetUp setUp, int captureAt, float& semis, bool& reversed)
@@ -213,6 +229,166 @@ static Result run (const std::string& name, float seconds,
     return res;
 }
 
+
+// ---- Murk: every mode runs cleanly, and the behaviours the feature map promises hold ----
+static int murkTests (const std::string& out, const std::function<Result (const std::string&, float, const std::function<void (float, EngineParams&)>&)>& go)
+{
+    int fails = 0;
+    auto expect = [&] (bool ok, const std::string& what)
+    {
+        std::printf ("  %s  %s\n", ok ? "pass" : "FAIL", what.c_str());
+        if (! ok) ++fails;
+    };
+    auto sane = [&] (const Result& r, const std::string& what, float minRms = 0.004f)
+    {
+        expect (! r.nan && r.peak < 1.2f && r.rms > minRms, what + " is clean and audible");
+    };
+    std::printf ("\nMurk\n");
+
+    // wet modes
+    for (int mode = 0; mode < 3; ++mode)
+        for (float m : { 0.0f, 0.5f, 1.0f })
+        {
+            const std::string name = std::string ("murk_") + (mode == 0 ? "soup" : (mode == 1 ? "relay" : "flip")) + "_modify_" + std::to_string ((int) (m * 100));
+            sane (go (name, 8, [mode, m] (float, EngineParams& p) { p.mode = 1; p.glue = 0.0f; p.wetOn = true; p.murkWet = mode; p.time = 0.6f; p.wetModify = m; }), name);
+        }
+    for (int mode = 0; mode < 3; ++mode)
+    {
+        const std::string name = "murk_freeze_wet" + std::to_string (mode);
+        const auto r = go (name, 10, [mode] (float t, EngineParams& p) { p.mode = 1; p.wetOn = true; p.murkWet = mode; p.time = 0.5f; p.wetModify = 0.4f; p.freeze = t > 1.5f; });
+        expect (! r.nan && r.peak < 1.2f && r.tailRms > 0.004f, name + " keeps sounding after the input stops");
+    }
+
+    // Soup: Time sets the decay
+    {
+        const auto shortT = go ("murk_soup_time_short", 10, [] (float, EngineParams& p) { p.mode = 1; p.glue = 0; p.wetOn = true; p.murkWet = 0; p.time = 0.15f; p.wetModify = 0.3f; });
+        const auto longT = go ("murk_soup_time_long", 10, [] (float, EngineParams& p) { p.mode = 1; p.glue = 0; p.wetOn = true; p.murkWet = 0; p.time = 0.9f; p.wetModify = 0.3f; });
+        expect (longT.tailRms > shortT.tailRms * 3.0f, "Soup: a longer Time rings on for longer");
+    }
+
+    // Relay: every repeat at the same level, and exactly as many as Modify asks for
+    {
+        const int N = (int) (kFs * 4);
+        MurmurEngine e;
+        e.prepare (kFs);
+        EngineParams p;
+        p.mode = 1; p.glue = 0; p.mix = 1; p.dryKill = true; p.wetOn = true; p.murkWet = 1;
+        p.time = 0.4f; p.wetModify = (3.0f + 0.5f) / 16.0f; // four repeats
+        std::vector<float> l ((size_t) N, 0.0f), r ((size_t) N, 0.0f);
+        for (int i = 0; i < 48; ++i) l[(size_t) (2400 + i)] = r[(size_t) (2400 + i)] = 0.6f * std::sin (kPi * (float) i / 48.0f);
+        for (int i = 0; i < N; i += 64) e.process (l.data() + i, r.data() + i, std::min (64, N - i), p);
+        const float T = MurkWet::relayTime (p.time) * kFs / 64000.0f;
+        float pk[6] {};
+        for (int k = 1; k <= 5; ++k)
+            for (int i = (int) (2400 + k * T) - 300; i < (int) (2400 + k * T) + 300 && i < N; ++i)
+                pk[k] = std::max (pk[k], std::fabs (l[(size_t) i]));
+        const float lo = std::min ({ pk[1], pk[2], pk[3], pk[4] }), hi = std::max ({ pk[1], pk[2], pk[3], pk[4] });
+        std::printf ("  relay repeats %.3f %.3f %.3f %.3f, then %.3f\n", pk[1], pk[2], pk[3], pk[4], pk[5]);
+        expect (lo > 0.05f && hi / lo < 1.15f, "Relay: four repeats, all at the same level");
+        expect (pk[5] < lo * 0.1f, "Relay: and no fifth");
+    }
+
+    // Flip: the chord's voices land at the right pitch
+    for (int slot : { 26, 21, 24 })
+    {
+        const auto& chord = FlipChords::at (slot);
+        if (chord.n != 1) continue;
+        const int N = (int) (kFs * 3);
+        MurmurEngine e;
+        e.prepare (kFs);
+        EngineParams p;
+        p.mode = 1; p.glue = 0; p.mix = 1; p.dryKill = true; p.wetOn = true; p.murkWet = 2;
+        p.time = 0.0f; p.wetModify = ((float) slot + 0.5f) / 48.0f;
+        std::vector<float> l ((size_t) N), r ((size_t) N);
+        for (int i = 0; i < N; ++i) l[(size_t) i] = r[(size_t) i] = 0.3f * std::sin (kTwoPi * 220.0f * (float) i / kFs);
+        for (int i = 0; i < N; i += 64) e.process (l.data() + i, r.data() + i, std::min (64, N - i), p);
+        const float semis = 12.0f * std::log2 (peakHz (l, (int) (1.0f * kFs), (int) (2.8f * kFs)) / 220.0f);
+        expect (std::fabs (semis - (float) chord.semis[0]) < 0.3f,
+                "Flip slot " + std::to_string (slot) + " plays " + std::to_string (chord.semis[0]) + " semitones (measured " + std::to_string (semis) + ")");
+    }
+
+    // Loop record (footswitch B): the loop is exactly as long as what was recorded
+    for (float bpm : { 0.0f, 120.0f })
+    {
+        MurmurEngine e;
+        e.prepare (kFs);
+        EngineParams p;
+        p.mode = 1; p.bpm = bpm;
+        const int N = (int) (kFs * 4);
+        std::vector<float> l, r;
+        makeInput (l, r, N);
+        const float recFrom = 0.3f, recTo = 0.3f + 1.9f;
+        for (int i = 0; i < N; i += 64)
+        {
+            const float t = (float) i / kFs;
+            p.loopRec = t >= recFrom && t < recTo;
+            p.loopOn = t >= recTo;
+            e.process (l.data() + i, r.data() + i, std::min (64, N - i), p);
+        }
+        const float secs = (float) e.getLoop().length() / 64000.0f;
+        const float want = bpm > 0.0f ? 2.0f : 1.9f; // synced: rounds to four beats
+        expect (std::fabs (secs - want) < 0.03f, std::string ("Loop record") + (bpm > 0 ? " at 120 BPM rounds to whole beats" : " keeps exactly what was recorded")
+                                                   + " (" + std::to_string (secs) + " s)");
+    }
+
+    // loop modes
+    for (int mode = 0; mode < 3; ++mode)
+        for (float m : { 0.0f, 0.5f, 1.0f })
+        {
+            const std::string name = std::string ("murk_") + (mode == 0 ? "burst" : (mode == 1 ? "radio" : "mask")) + "_modify_" + std::to_string ((int) (m * 100));
+            sane (go (name, 10, [mode, m] (float t, EngineParams& p) { p.mode = 1; p.loopOn = t > 2.8f; p.murkLoop = mode; p.loopModify = m; p.length = 0.5f; }), name);
+        }
+    for (int s = 0; s < MurkLoop::kStations; ++s)
+    {
+        const std::string name = std::string ("murk_radio_") + MurkLoop::stationName (s);
+        sane (go (name, 10, [s] (float t, EngineParams& p) { p.mode = 1; p.loopOn = t > 2.8f; p.murkLoop = 1; p.loopModify = (float) s / 4.0f; p.length = 0.5f; }), name);
+    }
+    sane (go ("murk_radio_tuning_sweep", 12, [] (float t, EngineParams& p) { p.mode = 1; p.loopOn = t > 2.8f; p.murkLoop = 1; p.loopModify = clampf ((t - 3.0f) / 9.0f, 0, 1); }), "Radio tuned across every station");
+    for (int c = 0; c < 5; ++c)
+    {
+        const std::string name = std::string ("murk_mask_") + MurkLoop::maskName (c);
+        sane (go (name, 10, [c] (float t, EngineParams& p) { p.mode = 1; p.loopOn = t > 2.8f; p.murkLoop = 2; p.loopModify = 0.8f; p.length = (float) c / 4.0f; }), name);
+    }
+
+    // Burst: playing loud over the pattern scrambles it, Modify fully down never does
+    for (float m : { 0.0f, 0.9f })
+    {
+        MurmurEngine e;
+        e.prepare (kFs);
+        EngineParams p;
+        p.mode = 1; p.murkLoop = 0; p.loopModify = m; p.length = 0.4f;
+        const int N = (int) (kFs * 8);
+        std::vector<float> l, r;
+        makeInput (l, r, N);
+        for (int i = (int) (4.5f * kFs); i < (int) (5.5f * kFs); ++i) l[(size_t) i] = r[(size_t) i] = 0.5f * std::sin ((float) i * 0.05f);
+        int maxFill = 0;
+        for (int i = 0; i < N; i += 64)
+        {
+            p.loopOn = i > (int) (2.8f * kFs);
+            e.process (l.data() + i, r.data() + i, std::min (64, N - i), p);
+            maxFill = std::max (maxFill, e.getLoop().burstFill());
+        }
+        expect (m > 0.5f ? maxFill > 0 : maxFill == 0, m > 0.5f ? "Burst: loud playing triggers a fill" : "Burst: Modify fully down never fills");
+    }
+
+    // Glue, Dry Glue and Cross
+    {
+        const auto clean = go ("murk_glue_off", 8, [] (float, EngineParams& p) { p.mode = 1; p.glue = 0; p.wetOn = true; p.murkWet = 1; p.wetModify = 0.3f; });
+        const auto warm = go ("murk_glue_warm", 8, [] (float, EngineParams& p) { p.mode = 1; p.glue = 0.3f; p.wetOn = true; p.murkWet = 1; p.wetModify = 0.3f; });
+        const auto wreck = go ("murk_glue_wrecked", 8, [] (float, EngineParams& p) { p.mode = 1; p.glue = 1.0f; p.wetOn = true; p.murkWet = 1; p.wetModify = 0.3f; });
+        expect (! wreck.nan && wreck.peak <= 1.0f && warm.peak <= 1.0f, "Glue never clips past full scale");
+        expect (std::fabs (warm.rms - clean.rms) < clean.rms * 0.8f, "Glue low keeps the level roughly even");
+        sane (go ("murk_dry_glue", 8, [] (float, EngineParams& p) { p.mode = 1; p.glue = 0.6f; p.dryGlue = true; p.dryKill = false; p.mix = 0.0f; }), "Dry Glue with Mix down (a stereo saturator)");
+        for (int src = 0; src < 3; ++src)
+            sane (go ("murk_cross_from" + std::to_string (src), 10, [src] (float t, EngineParams& p) { p.mode = 1; p.cross = 0.9f; p.crossSource = src; p.wetOn = true; p.murkWet = 0; p.loopOn = t > 2.8f; p.murkLoop = 1; }),
+                  "Cross from source " + std::to_string (src));
+        sane (go ("murk_eq_dark", 8, [] (float, EngineParams& p) { p.mode = 1; p.eqTilt = -1; p.wetOn = true; p.murkWet = 0; }), "EQ tilted dark");
+        sane (go ("murk_eq_bright", 8, [] (float, EngineParams& p) { p.mode = 1; p.eqTilt = 1; p.wetOn = true; p.murkWet = 0; }), "EQ tilted bright");
+    }
+    (void) out;
+    return fails;
+}
+
 int main (int argc, char** argv)
 {
     const std::string out = argc > 1 ? argv[1] : "";
@@ -290,6 +466,7 @@ int main (int argc, char** argv)
         if (t > 4.0f && t < 4.01f) g_eng->synthNoteOn (60, 1.0f); }, out));
 
     failures += pitchRangeTests();
+    failures += murkTests (out, [&] (const std::string& n, float secs, const std::function<void (float, EngineParams&)>& sc) { return run (n, secs, sc, out); });
 
     std::printf ("\n%s (%d failures)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures);
     return failures == 0 ? 0 : 1;

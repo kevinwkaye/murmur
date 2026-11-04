@@ -1,42 +1,64 @@
-# Murmur foot control plan
+# Murmur foot control
 
-Written 4 November 2026 from a cross-plugin audit. Build it in Murmur's own thread.
+First written 4 November 2026 from a cross-plugin audit. Built in v0.3.0 (4 November 2026), together with Murk mode.
 
-## What happens today
+## What changed in v0.3.0
 
-- The MOOD CC chart answers on every channel. Footswitches A to D on CC 20 to 23 would move Ramp Speed, Wet Mode, Routing and Loop Mode instead of working as footswitches. This is the urgent fix.
-- The expression pedal only reaches Murmur on CC 100, so CC 11 does nothing.
-- No Learn, no calibration, no Pedal page. The two on-screen footswitches work well and should stay.
+- **Shared module.** `Source/PedalControl.*` and `Source/Keeper.*` are copied from kevinwkaye/prism--patch, including `DirectMidiInput`, so every copy of Murmur hears the footswitch with no setup and no MIDI track.
+- **B+C combo.** `FootswitchLogic` gains `ComboBC` and `ComboHoldBC` for the two middle switches, with the same timings as A+B and C+D. Murmur uses the hold to switch mode. Other plugins can copy the updated module; nothing they do changes, because the new events only fire for B+C.
+- **MIDI routing.** Every message goes to the pedal code first. A footswitch, expression or Keeper message on its learned channel and CC is consumed there. Notes, pitch bend and program changes carry on as before.
+- **Original pedal MIDI map.** The MOOD CC chart only answers on the channel picked under ORIGINAL PEDAL MIDI MAP on the Pedal page, off by default. In Murk the mode CCs pick Murk's modes.
+- **Pedal page.** Four footswitch flip cards (letter, what it reads now, tap job, hold job, what it listens for, Learn), the two-switch combos with TRY buttons, the expression panel (target, heel to toe, Calibrate, Learn, curve), footswitch input, the original map channel and Keeper (Live or Studio, Export, Learn a Keeper switch). MURMUR and MURK pills show each mode's table. SHOW ACTIONS opens the plain-words overlay.
+- **On-screen buttons.** WET and LOOP on the panel, and the letter cards on the Pedal page, press the footswitches exactly as the real ones do. The mode card, KEEP, the preset toggle and TAP TEMPO cover the rest.
+- **Pebble** taps its foot on a press, leans with the expression pedal, nods after Keeper, scowls and flips into Murk and shakes with relief coming back.
 
-## Footswitch defaults
+## Footswitch table (both modes)
 
-| Footswitch | Tap | Hold |
+Every job is the same in Murmur and Murk, so there are no remaps. Bad Mood's own footswitches do the same jobs as MOOD MKII's, apart from extras that don't need a footswitch in a plugin (hidden options are the Deep page, hold-and-turn volume is a dial, triple-tap true bypass doesn't apply).
+
+| Footswitch | Murmur | Murk | Needs |
+| --- | --- | --- | --- |
+| A tap | Wet channel on or off | Same | One press |
+| A hold | Freeze (latches with Latch) | Same | Hold 0.45 s |
+| B tap | Loop: record, then play, then stop | Same | **One press per step: three to record, play and stop** |
+| B hold | Overdub (latches with Latch) | Same | Hold 0.45 s |
+| C tap | Tap tempo | Same | **Two or more taps to set a tempo** |
+| C hold | Save to the current preset slot (A or B) | Same | Hold 0.45 s |
+| D tap | Next preset slot (A, Live, B) | Same | One press |
+| D hold | Previous preset slot | Same | Hold 0.45 s |
+| A+B tap | Both channels on or off (on loops what it just heard) | Same | **Two switches together** |
+| B+C hold | Switch to Murk | Switch to Murmur | **Two switches, held 1 s** |
+| C+D tap | Hand the footswitches to the next Murmur | Same | **Two switches together** |
+| C+D hold | Keeper | Same | **Two switches, held 1 s** |
+
+Flagged in bold: anything needing more than one press, or two switches. Nothing needs a double-tap and nothing needs a hold of more than one second.
+
+Changed from the first plan, at Kevin's request: B is loop record (tap to record, play, stop) rather than the MOOD's instant "loop what you just heard". A+B keeps the instant capture.
+
+Timings, shared with every Flip Fella plugin: hold 0.45 s, combo window 0.12 s, combo hold 1 s.
+
+## Expression
+
+Assignable per mode and per preset (the Expression Target parameter is part of each mode's settings and each preset). Calibration, curve and the CC are global and shared by every Flip Fella plugin.
+
+| Mode | Default target | Why |
 | --- | --- | --- |
-| A | Wet channel on or off | Freeze (latches if Latch is on) |
-| B | Loop channel on or off | Overdub (latches if Latch is on) |
-| C | Tap tempo | Save to the current preset slot |
-| D | Next preset slot | Previous preset slot |
-| A+B | Both channels on or off | |
-| C+D held 1 second | Keeper | |
+| Murmur | Clock | Heel to toe walks down the 11 stops, the pitch drop the demo loved |
+| Murk | Glue | Warm at the heel, wrecked at the toe |
 
-## Expression default
+"Ramp targets" keeps the original pedal's behaviour: moving the pedal sets Driven By to Expression and sweeps whichever knobs the Motion page's ramp switches pick.
 
-Drives the Expression parameter, so the MOOD behaviour stays: whatever the ramp dip switches target sweeps with the pedal. Moving the pedal sets Driven By to Expression. Calibration replaces Expression Polarity for real pedals, but keep the parameter for the original MIDI map (CC 68).
+## Modes, presets and Keeper
 
-## How to build it
+- Switching mode stores the outgoing mode's settings and restores the incoming mode's (its defaults the first time). Channel on and off states, tempo sync and input level stay put. The loop buffer carries over.
+- Moving the Mode parameter from automation does the same swap.
+- Presets A and B, the Live slot and Ableton's saved sets store the mode and both modes' settings.
+- Keeper entries record the mode, what the panel reads in words, the expression target and position, and every parameter.
 
-Prism Patch is the reference. Its foot control already follows the house rules, and its Pedal page design is already approved, so reuse it rather than drawing a new one.
+## Tests
 
-1. **Shared module.** Copy `Source/PedalControl.h` and `Source/PedalControl.cpp` from kevinwkaye/prism--patch, unchanged apart from the ComboHold addition below. Settings live in the shared `Flip Fella Pedals.xml`, so a setup made in one plugin works in all of them.
-2. **Combo hold.** Add a `ComboHoldAB` / `ComboHoldCD` event to `FootswitchLogic`: fire it when both switches of a combo stay down for 1 second. A combo tap keeps firing on press as now. Hold C+D for 1 second is reserved for Keeper in every plugin. If Prism Patch has already added this, copy its version.
-3. **MIDI routing.** In `handleMidi`, offer every message to the pedal code first. A footswitch or expression message on its learned channel and CC is consumed there and goes no further. Notes, pitch bend and program changes carry on as before.
-4. **Original pedal MIDI map.** Move the existing CC chart behind an "Original pedal MIDI map" channel setting on the Pedal page, off by default, exactly as Prism Patch does. This is what stops footswitches A to D and the expression pedal colliding with the chart.
-5. **Pedal page.** Four footswitch flip cards showing Tap and Hold jobs, what each listens for, Learn and Defaults. An expression bar with target, Calibrate heel and toe, Learn, curve and smoothing.
-6. **On-screen buttons.** Every footswitch job also has a button on the main page, so friends without pedals miss nothing.
-7. **Pebble.** Taps its foot on a press, leans with the expression pedal.
-8. **Keeper.** Hold C+D for 1 second runs Keeper. If Keeper isn't built in this plugin yet, reserve the combo and leave it silent.
-9. **No brand names** anywhere in the UI. Use "Footswitches", "Footswitch A to D" and "Expression".
-10. **README.** Copy Prism Patch's "Footswitches and expression (optional)" and "Getting footswitch MIDI to the plugin in Ableton" sections, with this plugin's table.
-11. **Tests.** Tap, hold, A+B and C+D combos from plain 127/0 messages. A clash test: CC 20, 21, 22, 23 and 11 on channel 16 change nothing except the jobs in the table, with the original pedal map both off and on a different channel.
+`Tests/PluginTest.cpp` covers tap, hold, A+B, B+C and C+D from plain 127 and 0 messages; B+C tapped or held 0.6 s never switching mode; the clash audit (CC 20 to 23 and CC 11 on channel 16 change only their own jobs, with the original map off and on channel 1); Learn; expression defaults per mode, calibration of a reversed short-range pedal and per-mode memory; mode stashes; presets and saved sets keeping the mode.
 
-The defaults in the table are proposals based on the original pedal's footswitches. Kevin can change any of them before the build.
+## Open question
+
+Two different plugins (separate DLLs) can't both open the footswitch device on Windows. When Murmur and Prism Patch are both loaded, the one that opens second needs the Ableton MIDI track route until there's a shared way to pass the footswitches between plugins.

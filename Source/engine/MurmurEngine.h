@@ -7,6 +7,8 @@
 
 #include "LoopChannel.h"
 #include "Modulation.h"
+#include "MurkFx.h"
+#include "MurkWet.h"
 #include "WetChannel.h"
 #include <atomic>
 
@@ -14,6 +16,9 @@ namespace murmur
 {
 struct EngineParams
 {
+    // top-level mode: 0 Murmur (MOOD), 1 Murk (the grumpy sibling)
+    int mode = 0;
+
     // front panel
     float mix = 0.5f;
     float clock = 1.0f;          // knob 0..1
@@ -21,7 +26,7 @@ struct EngineParams
     bool wetOn = false, freeze = false;
     int wetMode = 0;
     float time = 0.5f, wetModify = 0.5f;
-    bool loopOn = false, overdub = false;
+    bool loopOn = false, overdub = false, loopRec = false;
     int loopMode = 1;
     float length = 1.0f, loopModify = 0.7f;
 
@@ -57,6 +62,15 @@ struct EngineParams
     // tempo: > 0 when synced to Ableton or tap tempo
     float bpm = 0.0f;
 
+    // Murk: wet modes Soup, Relay, Flip; loop modes Burst, Radio, Mask
+    int murkWet = 0, murkLoop = 1;
+    float glue = 0.25f;          // 0 off .. 1 thrashed
+    bool dryGlue = false;        // the dry signal runs through Glue too
+    float cross = 0.0f;          // 0 off
+    int crossSource = 0;         // 0 input moves both, 1 wet moves the loop, 2 loop moves the wet
+    float eqTilt = 0.0f;         // -1 darker .. +1 brighter
+    int eqOn = 1;                // 0 wet, 1 both, 2 loop
+
     // Synth Mode
     int synthGate = 0;           // 0 drone (the pedal's default), 1 gate, 2 ADSR
     float attack = 0.04f, decay = 0.3f, sustain = 0.7f, release = 1.2f, glide = 0.08f; // seconds / level
@@ -73,6 +87,7 @@ public:
     {
         fs = (float) sampleRate;
         wet.prepare();
+        murkWet.prepare();
         loop.prepare ((int) (kMaxSeconds * kTopRate));
         reset();
     }
@@ -80,7 +95,9 @@ public:
     void reset()
     {
         wet.reset();
+        murkWet.reset();
         loop.reset();
+        glue.reset(); cross.reset(); tiltWet.reset(); tiltLoop.reset();
         phase = 0.0f;
         prevOut = curOut = lastWet = {};
         for (auto& f : inLp) f.reset();
@@ -161,6 +178,7 @@ public:
     std::atomic<float> uiTime { 0.5f }, uiWetMod { 0.5f }, uiClock { 1.0f }, uiLoopMod { 0.5f }, uiLength { 1.0f };
 
     const LoopChannel& getLoop() const { return loop; }
+    bool recordingFull() const { return loop.recordingFull(); }
     std::atomic<float> uiClockHz { kTopRate };
 
 private:
@@ -198,7 +216,8 @@ private:
     void processChunk (float* left, float* right, int numSamples, const EngineParams& p)
     {
         const bool synthOn = synth.isActive();
-        const float target = synthOn ? synth.targetLog2 (p.synthRoot) : clockLog2 (p.clock, p.stepSet, p.smoothClock);
+        const float target = (synthOn ? synth.targetLog2 (p.synthRoot) : clockLog2 (p.clock, p.stepSet, p.smoothClock))
+                             + (p.mode == 1 ? cross.pitch : 0.0f);
         if (logRatio < -100.0f) logRatio = target;
         const float slewSec = synthOn ? std::max (0.002f, p.glide) : (p.smoothClock ? 0.04f : 0.003f);
         const float slew = 1.0f - std::exp (-1.0f / (slewSec * fs));
@@ -250,6 +269,20 @@ private:
             oL *= g;
             oR *= g;
 
+            if (p.mode == 1) // Murk: Glue sits after both channels, or after everything with Dry Glue
+            {
+                if (p.dryGlue)
+                {
+                    const Stereo all = glue.process ({ inL * dryG + oL * wetG, inR * dryG + oR * wetG }, p.glue);
+                    left[i] = all.l * outGain;
+                    right[i] = all.r * outGain;
+                    continue;
+                }
+                const Stereo gl = glue.process ({ oL, oR }, p.glue);
+                oL = gl.l;
+                oR = gl.r;
+            }
+
             left[i] = (inL * dryG + oL * wetG) * outGain;
             right[i] = (inR * dryG + oR * wetG) * outGain;
         }
@@ -276,13 +309,18 @@ private:
             wp.syncLen = loop.length();
 
         // ---- tempo sync: Time snaps to note values, the loop listens for one bar ----
+        const bool murk = p.mode == 1;
+        float beat = 0.0f;
         if (p.bpm > 0.0f)
         {
             static constexpr float noteBeats[6] = { 0.125f, 0.25f, 1.0f / 3.0f, 0.5f, 0.75f, 1.0f }; // 32nd .. quarter
+            static constexpr float murkBeats[7] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 6.0f, 8.0f };     // 16th .. double whole
             static constexpr float lengthFrac[6] = { 1.0f / 32, 1.0f / 16, 1.0f / 8, 0.25f, 0.5f, 1.0f };
             const float secPerBeat = 60.0f / p.bpm;
+            beat = secPerBeat * coreRate;
             const int ni = std::min (5, (int) (clampf (p.time, 0, 1) * 6.0f));
             wp.fixedLen = noteBeats[ni] * secPerBeat * coreRate;
+            murkFixed = murkBeats[std::min (6, (int) (clampf (p.time, 0, 1) * 7.0f))] * beat;
             if (p.sync != 1)
                 capacity = (int) clampf (4.0f * secPerBeat * coreRate, 256.0f, (float) (kMaxSeconds * kTopRate));
             tapeFraction = lengthFrac[std::min (5, (int) (clampf (p.length, 0, 1) * 6.0f))];
@@ -290,18 +328,23 @@ private:
         else
         {
             tapeFraction = 0.0f;
+            murkFixed = 0.0f;
         }
 
         LoopChannel::Params lp;
-        lp.mode = p.loopMode; lp.length = p.length; lp.modify = p.loopModify;
-        lp.playing = p.loopOn; lp.overdub = p.overdub && p.loopOn; lp.noDub = p.noDub;
-        lp.classic = p.classic; lp.spread = loopSpread; lp.width = p.width;
+        lp.mode = murk ? LoopChannel::Burst + clampInt (p.murkLoop, 0, 2) : p.loopMode;
+        lp.length = p.length; lp.modify = p.loopModify;
+        lp.playing = p.loopOn; lp.overdub = p.overdub && p.loopOn; lp.noDub = ! murk && p.noDub;
+        lp.classic = ! murk && p.classic; lp.spread = loopSpread; lp.width = p.width;
         lp.fade = p.fade; lp.capacity = capacity; lp.coreRate = coreRate;
-        lp.lengthFraction = tapeFraction;
+        lp.lengthFraction = murk ? 0.0f : tapeFraction;
+        lp.beat = beat;
+        lp.recording = p.loopRec && ! p.loopOn;
+        lp.recordCapacity = (int) (kMaxSeconds * kTopRate);
 
         // While listening, the loop records the input AND the Wet Channel output,
         // whatever the routing says. Overdubs record clean input only.
-        const Stereo loopOut = loop.process (in, in + lastWet, in, lp);
+        Stereo loopOut = loop.process (in, in + lastWet, in, lp);
 
         // ---- routing ----
         const bool both = p.loopOn && p.wetOn;
@@ -316,7 +359,18 @@ private:
         const bool wetActive = p.wetOn || p.trails;
         Stereo wetOut;
         if (wetActive || wetGain > 0.0f)
-            wetOut = wet.process (wetIn, wp);
+        {
+            if (murk)
+            {
+                MurkWet::Params mp;
+                mp.mode = clampInt (p.murkWet, 0, 2); mp.time = p.time; mp.modify = p.wetModify;
+                mp.freeze = wp.freeze; mp.spread = wetSpread; mp.width = p.width; mp.coreRate = coreRate;
+                mp.fixedLen = murkFixed;
+                wetOut = murkWet.process (wetIn, mp);
+            }
+            else
+                wetOut = wet.process (wetIn, wp);
+        }
         const float wTarget = wetActive ? 1.0f : 0.0f;
         wetGain += clampf (wTarget - wetGain, -1.0f / 256.0f, 1.0f / 256.0f);
         wetOut = wetOut * wetGain;
@@ -326,14 +380,28 @@ private:
         const bool routedThroughWet = both && p.routing != 0;
         const Stereo loopContrib = routedThroughWet ? loopOut * clampf (p.direct, 0, 1) : loopOut;
 
+        if (murk)
+        {
+            // Cross: the source's level moves the target's volume (and the Clock's pitch)
+            const Stereo src = p.crossSource == 1 ? wetOut : (p.crossSource == 2 ? loopOut : in);
+            cross.tick (src, p.cross, coreRate);
+            if (p.crossSource != 2) loopOut = loopOut * cross.volume;
+            if (p.crossSource != 1) wetOut = wetOut * cross.volume;
+
+            // EQ tilt on the wet, the loop or both
+            if (p.eqOn != 2) wetOut = tiltWet.process (wetOut, p.eqTilt, coreRate);
+            if (p.eqOn != 0) loopOut = tiltLoop.process (loopOut, p.eqTilt, coreRate);
+        }
+        const Stereo loopContribM = routedThroughWet ? loopOut * clampf (p.direct, 0, 1) : loopOut;
+
         const float b = clampf (p.balance, -1, 1);
         const float gWet = b < 0 ? dbToGain (12.0f * b) : 1.0f;
         const float gLoop = b > 0 ? dbToGain (-12.0f * b) : 1.0f;
 
-        Stereo core = wetOut * gWet + loopContrib * gLoop;
+        Stereo core = wetOut * gWet + (murk ? loopContribM : loopContrib) * gLoop;
         core = { softClip (core.l), softClip (core.r) }; // safety: never louder than ~0 dBFS
 
-        if (p.classic) // noise-full clock: hiss rises as the Clock drops
+        if (p.classic && ! murk) // noise-full clock: hiss rises as the Clock drops
         {
             const float depth = 1.0f - coreRate / kTopRate;
             const float amp = 0.006f * depth * depth;
@@ -352,7 +420,13 @@ private:
     Stereo prevOut, curOut, lastWet;
     OnePole inLp[2], outLp[2];
     WetChannel wet;
+    MurkWet murkWet;
     LoopChannel loop;
+    Glue glue;
+    Cross cross;
+    Tilt tiltWet, tiltLoop;
+    float murkFixed = 0.0f;
+    static int clampInt (int v, int lo, int hi) { return std::max (lo, std::min (hi, v)); }
     Rng rng;
     const EngineParams* params = nullptr;
     EngineParams cur;

@@ -33,6 +33,7 @@ jobs:
         run: |
           build\Release\murmur_plugin_test.exe | Tee-Object -FilePath reports\plugin-test.txt
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          build\Release\murmur_plugin_test.exe --snapshots reports\screens
 
       - name: CPU benchmark
         shell: pwsh
@@ -101,6 +102,7 @@ jobs:
           mkdir -p reports
           build/murmur_render_test | tee reports/render-test.txt
           xvfb-run -a build/murmur_plugin_test | tee reports/plugin-test.txt
+          xvfb-run -a build/murmur_plugin_test --snapshots reports/screens
           build/murmur_bench | tee reports/cpu-linux-arm64.txt
 
       - name: Publish to the builds-linux-arm64 branch

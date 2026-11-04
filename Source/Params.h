@@ -6,6 +6,9 @@
 // but none needs host automation to be useful.
 namespace ParamIDs
 {
+// top-level mode: Murmur or Murk
+inline constexpr auto mode = "mode";
+
 // front panel
 inline constexpr auto mix = "mix";
 inline constexpr auto clock = "clock";
@@ -16,6 +19,7 @@ inline constexpr auto wetMode = "wetMode";
 inline constexpr auto time = "time";
 inline constexpr auto wetModify = "wetModify";
 inline constexpr auto loopOn = "loopOn";
+inline constexpr auto loopRec = "loopRec";
 inline constexpr auto overdub = "overdub";
 inline constexpr auto loopMode = "loopMode";
 inline constexpr auto length = "length";
@@ -77,7 +81,50 @@ inline constexpr auto synthRoot = "synthRoot";
 
 // the pedal's preset toggle
 inline constexpr auto presetSlot = "presetSlot";
+
+// Murk
+inline constexpr auto murkWet = "murkWet";
+inline constexpr auto murkLoop = "murkLoop";
+inline constexpr auto glue = "glue";
+inline constexpr auto dryGlue = "dryGlue";
+inline constexpr auto cross = "cross";
+inline constexpr auto crossSource = "crossSource";
+inline constexpr auto eqTilt = "eqTilt";
+inline constexpr auto eqOn = "eqOn";
+
+// foot control and Keeper
+inline constexpr auto expTarget = "expTarget";
+inline constexpr auto keeper = "keeper";
 } // namespace ParamIDs
+
+namespace names
+{
+// What the expression pedal can move. "Ramp targets" is the original pedal's behaviour:
+// it sweeps whichever knobs the Motion page's ramp switches pick.
+struct ExpTarget { const char* id; const char* label; };
+inline const std::vector<ExpTarget>& expTargets()
+{
+    static const std::vector<ExpTarget> t {
+        { "expression", "Ramp targets" }, { "mix", "Mix" }, { "clock", "Clock" }, { "time", "Time" },
+        { "wetModify", "Wet Modify" }, { "length", "Length" }, { "loopModify", "Loop Modify" },
+        { "glue", "Glue" }, { "cross", "Cross" }, { "eqTilt", "EQ" } };
+    return t;
+}
+inline juce::StringArray expTargetNames()
+{
+    juce::StringArray s;
+    for (const auto& t : expTargets()) s.add (t.label);
+    return s;
+}
+inline int expTargetIndex (const char* id)
+{
+    const auto& t = expTargets();
+    for (size_t i = 0; i < t.size(); ++i) if (juce::String (t[i].id) == id) return (int) i;
+    return 0;
+}
+// Each mode's own expression default: Clock walks Murmur down its 11 stops, Glue takes Murk from warm to wrecked
+inline int defaultExpTarget (int mode) { return expTargetIndex (mode == 1 ? "glue" : "clock"); }
+} // namespace names
 
 inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
 {
@@ -102,6 +149,9 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
         layout.add (std::make_unique<C> (ParameterID { id, 1 }, name, items, def));
     };
 
+    // ---- mode ----
+    choice (ParamIDs::mode, "Mode", { "Murmur", "Murk" }, 0);
+
     // ---- front panel ----
     knob (ParamIDs::mix, "Mix", 0.5f);
     layout.add (std::make_unique<P> (ParameterID { ParamIDs::clock, 1 }, "Clock", NormalisableRange<float> (0.0f, 1.0f), 1.0f,
@@ -117,6 +167,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     knob (ParamIDs::time, "Time", 0.5f);
     knob (ParamIDs::wetModify, "Wet Modify", 0.5f);
     toggle (ParamIDs::loopOn, "Loop On", false);
+    toggle (ParamIDs::loopRec, "Loop Record", false);
     toggle (ParamIDs::overdub, "Overdub", false);
     choice (ParamIDs::loopMode, "Loop Mode", { "Env", "Tape", "Stretch" }, 1);
     knob (ParamIDs::length, "Length", 1.0f);
@@ -211,6 +262,33 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
 
     // ---- preset toggle ----
     choice (ParamIDs::presetSlot, "Preset", { "A", "Live", "B" }, 1);
+
+    // ---- Murk ----
+    choice (ParamIDs::murkWet, "Murk Wet Mode", { "Soup", "Relay", "Flip" }, 0);
+    choice (ParamIDs::murkLoop, "Murk Loop Mode", { "Burst", "Radio", "Mask" }, 1);
+    layout.add (std::make_unique<P> (ParameterID { ParamIDs::glue, 1 }, "Glue", NormalisableRange<float> (0.0f, 1.0f), 0.25f,
+                                     AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+                                     {
+                                         if (v < 0.005f) return String ("Off");
+                                         const char* word = v < 0.4f ? "Warm " : (v < 0.7f ? "Hot " : "Wrecked ");
+                                         return String (word) + String (roundToInt (v * 100.0f)) + "%";
+                                     })));
+    toggle (ParamIDs::dryGlue, "Dry Glue", false);
+    layout.add (std::make_unique<P> (ParameterID { ParamIDs::cross, 1 }, "Cross", NormalisableRange<float> (0.0f, 1.0f), 0.0f,
+                                     AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+                                     { return v < 0.005f ? String ("Off") : String (roundToInt (v * 100.0f)) + "%"; })));
+    choice (ParamIDs::crossSource, "Cross From", { "Input", "Wet", "Loop" }, 0);
+    layout.add (std::make_unique<P> (ParameterID { ParamIDs::eqTilt, 1 }, "EQ Tilt", NormalisableRange<float> (-1.0f, 1.0f), 0.0f,
+                                     AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int)
+                                     {
+                                         if (std::abs (v) < 0.02f) return String ("Flat");
+                                         return String (v < 0 ? "Dark " : "Bright ") + String (roundToInt (std::abs (v) * 100.0f)) + "%";
+                                     })));
+    choice (ParamIDs::eqOn, "EQ On", { "Wet", "Both", "Loop" }, 1);
+
+    // ---- foot control and Keeper ----
+    choice (ParamIDs::expTarget, "Expression Target", names::expTargetNames(), names::defaultExpTarget (0));
+    toggle (ParamIDs::keeper, "Keeper", false);
 
     return layout;
 }

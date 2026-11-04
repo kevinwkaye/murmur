@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Murmur VERSION 0.2.1 LANGUAGES C CXX)
+project(Murmur VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -54,7 +54,9 @@ juce_add_binary_data(MurmurData SOURCES Resources/RobotoCondensed-Bold.ttf)
 
 target_sources(Murmur PRIVATE
     Source/PluginProcessor.cpp
-    Source/PluginEditor.cpp)
+    Source/PluginEditor.cpp
+    Source/PedalControl.cpp
+    Source/Keeper.cpp)
 
 target_include_directories(Murmur PRIVATE Source Source/engine)
 

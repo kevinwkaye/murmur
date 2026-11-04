@@ -467,69 +467,37 @@ void ClockFace::mouseWheelMove (const MouseEvent&, const MouseWheelDetails& w)
 }
 
 // =====================================================================================
-// Footswitch
+// Footswitch (on the panel)
 // =====================================================================================
-Footswitch::Footswitch (AudioProcessorValueTreeState& s, const String& mainId, const String& holdId,
-                        const String& n, const String& tapT, const String& holdT, const String& holdingT)
-    : state (s), name (n), tapText (tapT), holdText (holdT), holdingText (holdingT)
+Footswitch::Footswitch (MurmurProcessor& p, int s, const String& n, const String& tapT, const String& holdT)
+    : proc (p), sw (s), name (n), tapText (tapT), holdText (holdT)
 {
-    mainParam = s.getParameter (mainId);
-    holdParam = s.getParameter (holdId);
     setMouseCursor (MouseCursor::PointingHandCursor);
-}
-
-void Footswitch::set (RangedAudioParameter* p, bool v)
-{
-    p->beginChangeGesture();
-    p->setValueNotifyingHost (v ? 1.0f : 0.0f);
-    p->endChangeGesture();
 }
 
 void Footswitch::mouseDown (const MouseEvent&)
 {
     pressed = true;
-    held = false;
-    downAt = nowSeconds();
-    startTimer (20);
+    proc.footDown (sw);
     repaint();
-}
-
-void Footswitch::timerCallback()
-{
-    if (pressed && ! held && nowSeconds() - downAt > 0.35)
-    {
-        held = true;
-        const bool latch = state.getRawParameterValue (ParamIDs::latch)->load() > 0.5f;
-        const bool holdOn = holdParam->getValue() > 0.5f;
-        set (holdParam, latch ? ! holdOn : true);
-        if (mainParam->getValue() < 0.5f) set (mainParam, true);
-        repaint();
-    }
 }
 
 void Footswitch::mouseUp (const MouseEvent&)
 {
-    stopTimer();
-    const bool latch = state.getRawParameterValue (ParamIDs::latch)->load() > 0.5f;
-    if (! held)
-    {
-        const bool turnOn = mainParam->getValue() < 0.5f;
-        set (mainParam, turnOn);
-        if (! turnOn && holdParam->getValue() > 0.5f) set (holdParam, false);
-    }
-    else if (! latch)
-    {
-        set (holdParam, false);
-    }
-    pressed = held = false;
+    if (! pressed) return;
+    pressed = false;
+    proc.footUp (sw);
     repaint();
 }
 
 void Footswitch::paint (Graphics& g)
 {
+    auto& s = proc.apvts;
+    auto v = [&] (const char* id) { return s.getRawParameterValue (id)->load() > 0.5f; };
     auto r = getLocalBounds().toFloat().reduced (1.0f);
-    const bool on = mainParam->getValue() > 0.5f;
-    const bool holding = holdParam->getValue() > 0.5f;
+    const bool recording = sw == 1 && v (ParamIDs::loopRec);
+    const bool on = sw == 0 ? v (ParamIDs::wetOn) : (v (ParamIDs::loopOn) || recording);
+    const bool holding = sw == 0 ? v (ParamIDs::freeze) && on : v (ParamIDs::overdub) && v (ParamIDs::loopOn);
 
     g.setColour (pressed ? ff::card : ff::housing);
     g.fillRoundedRectangle (r, 12.0f);
@@ -539,7 +507,7 @@ void Footswitch::paint (Graphics& g)
     const Point<float> led (r.getX() + 25.0f, r.getCentreY());
     if (on)
     {
-        const float pulse = holding ? 0.5f + 0.5f * (float) std::sin (nowSeconds() * 8.0) : 1.0f;
+        const float pulse = holding || recording ? 0.5f + 0.5f * (float) std::sin (nowSeconds() * (recording ? 5.0 : 8.0)) : 1.0f;
         g.setColour (ff::red.withAlpha (0.22f * pulse));
         g.fillEllipse (led.x - 12.0f, led.y - 12.0f, 24.0f, 24.0f);
         g.setColour (ff::red);
@@ -555,19 +523,261 @@ void Footswitch::paint (Graphics& g)
     g.drawText (name, r.withTrimmedLeft (46.0f), Justification::centredLeft, false);
 
     auto cap = r.withTrimmedRight (16.0f);
-    if (holding)
+    if (holding || recording)
     {
-        ff::label (g, holdingText, cap.toNearestInt(), Justification::centredRight, ff::ink, 14.0f);
+        ff::label (g, recording ? "RECORDING" : (sw == 0 ? "FROZEN" : "DUBBING"), cap.toNearestInt(), Justification::centredRight, ff::ink, 14.0f);
     }
     else
     {
-        const bool latch = state.getRawParameterValue (ParamIDs::latch)->load() > 0.5f;
+        const bool latch = v (ParamIDs::latch);
         g.setColour (ff::dim);
         g.setFont (ff::font (12.0f, 0.06f));
         g.drawText (tapText, cap.withTrimmedBottom (cap.getHeight() * 0.5f).withTrimmedTop (8.0f), Justification::centredRight, false);
         g.drawText (latch ? holdText.replace ("HOLD", "HOLD TO LATCH") : holdText,
                     cap.withTrimmedTop (cap.getHeight() * 0.5f).withTrimmedBottom (8.0f), Justification::centredRight, false);
     }
+}
+
+// =====================================================================================
+// CardButton
+// =====================================================================================
+CardButton::CardButton()
+{
+    card.setInterceptsMouseClicks (false, false);
+    addAndMakeVisible (card);
+    setMouseCursor (MouseCursor::PointingHandCursor);
+}
+
+void CardButton::mouseUp (const MouseEvent& e)
+{
+    if (getLocalBounds().contains (e.getPosition()) && onClick) onClick (e);
+}
+
+// =====================================================================================
+// PedalCard
+// =====================================================================================
+PedalCard::PedalCard (MurmurProcessor& p, int s) : proc (p), sw (s)
+{
+    letter.setTextHeight (34.0f);
+    letter.setValue (String::charToString ((juce_wchar) ('A' + s)));
+    state.setTextHeight (20.0f);
+    tap.setTextHeight (15.0f);
+    hold.setTextHeight (15.0f);
+    for (auto* c : { &letter, &state, &tap, &hold })
+    {
+        c->setInterceptsMouseClicks (false, false);
+        addAndMakeVisible (*c);
+    }
+    addAndMakeVisible (learn);
+    learn.onClick = [this]
+    {
+        if (proc.learningWhat() == sw) proc.cancelLearn();
+        else proc.learnFootswitch (sw);
+    };
+    setMouseCursor (MouseCursor::PointingHandCursor);
+}
+
+void PedalCard::resized()
+{
+    const int w = getWidth();
+    letter.setBounds (0, 0, 52, 56);
+    state.setBounds (58, 0, w - 58, 56);
+    tap.setBounds (0, 80, w, 36);
+    hold.setBounds (0, 140, w, 36);
+    learn.setBounds (0, 198, w, 28);
+}
+
+void PedalCard::paint (Graphics& g)
+{
+    ff::label (g, "TAP", { 0, 62, 100, 16 }, Justification::centredLeft, ff::dim, 12.0f);
+    ff::label (g, "HOLD", { 0, 122, 100, 16 }, Justification::centredLeft, ff::dim, 12.0f);
+    ff::label (g, sends, { 0, 180, getWidth(), 14 }, Justification::centred, ff::dim, 12.0f);
+
+    // a red ring round the state card while the switch's job is on, readable from standing height
+    const auto st = proc.footState (sw);
+    const bool lit = st == "WET ON" || st == "FROZEN" || st == "REC" || st == "PLAYING" || st == "DUBBING";
+    if (lit || pressed)
+    {
+        g.setColour (pressed ? ff::ink : ff::red);
+        g.drawRoundedRectangle (state.getBounds().toFloat().expanded (2.0f), 11.0f, 3.0f);
+    }
+}
+
+void PedalCard::mouseDown (const MouseEvent& e)
+{
+    if (e.y > 60) return;
+    pressed = true;
+    proc.footDown (sw);
+    repaint();
+}
+
+void PedalCard::mouseUp (const MouseEvent&)
+{
+    if (! pressed) return;
+    pressed = false;
+    proc.footUp (sw);
+    repaint();
+}
+
+void PedalCard::tick (double dt, int tableMode)
+{
+    state.setValue (proc.footState (sw));
+    tap.setValue (MurmurProcessor::tapJob (tableMode, sw));
+    hold.setValue (MurmurProcessor::holdJob (tableMode, sw));
+    for (auto* c : { &letter, &state, &tap, &hold }) c->advance (dt);
+    const bool learning = proc.learningWhat() == sw;
+    learn.setButtonText (learning ? "PRESS IT" : "LEARN");
+    const auto& s = proc.pedals();
+    const String t = "CH " + String (s.fsChannel[(size_t) sw]) + String::fromUTF8 (" · CC ") + String (s.fsCC[(size_t) sw]);
+    if (t != sends) { sends = t; repaint(); }
+    const bool down = (proc.uiFootDown.load() >> sw) & 1;
+    letter.setAlpha (down ? 0.6f : 1.0f);
+    repaint (state.getBounds().expanded (4));
+}
+
+// =====================================================================================
+// ExpressionPanel
+// =====================================================================================
+ExpressionPanel::ExpressionPanel (MurmurProcessor& p) : proc (p)
+{
+    target.setTextHeight (28.0f);
+    addAndMakeVisible (target);
+    for (auto* b : { &change, &calibrate, &learn }) addAndMakeVisible (*b);
+    addAndMakeVisible (curve);
+    change.onClick = [this] { targetMenu(); };
+    calibrate.onClick = [this] { proc.calibrateExpression(); };
+    learn.onClick = [this] { if (proc.learningWhat() == MurmurProcessor::LearnExpression) proc.cancelLearn(); else proc.learnExpression(); };
+    curve.onPick = [this] (int i) { proc.pedals().curve = i; proc.pedals().save(); curve.setSelected (i); };
+    curve.setSelected (proc.pedals().curve);
+}
+
+void ExpressionPanel::resized()
+{
+    const int w = getWidth();
+    target.setBounds (0, 24, w - 88, 52);
+    change.setBounds (w - 80, 35, 80, 30);
+    calibrate.setBounds (0, 168, (w - 8) / 2, 32);
+    learn.setBounds ((w + 8) / 2, 168, (w - 8) / 2, 32);
+    curve.setBounds (0, 230, w, 30);
+}
+
+void ExpressionPanel::targetMenu()
+{
+    PopupMenu m;
+    const auto& t = names::expTargets();
+    const int cur = roundToInt (proc.apvts.getRawParameterValue (ParamIDs::expTarget)->load());
+    for (int i = 0; i < (int) t.size(); ++i) m.addItem (100 + i, t[(size_t) i].label, true, i == cur);
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&change), [this] (int r)
+    {
+        if (r >= 100)
+            if (auto* prm = proc.apvts.getParameter (ParamIDs::expTarget))
+            {
+                prm->beginChangeGesture();
+                prm->setValueNotifyingHost (prm->convertTo0to1 ((float) (r - 100)));
+                prm->endChangeGesture();
+            }
+    });
+}
+
+void ExpressionPanel::paint (Graphics& g)
+{
+    ff::label (g, "EXPRESSION MOVES", { 0, 0, getWidth(), 16 });
+    const int mode = proc.currentMode();
+    ff::label (g, String ("SAVED WITH THE PRESET. ") + (mode == 1 ? "MURK DEFAULT: GLUE" : "MURMUR DEFAULT: CLOCK"),
+               { 0, 82, getWidth(), 14 }, Justification::centredLeft, ff::dim, 11.0f);
+
+    const float v = proc.expressionLevel();
+    const bool fresh = nowSeconds() - proc.lastExpressionMove() < 1.5;
+    ff::label (g, "HEEL", { 0, 104, 60, 16 }); ff::label (g, "TOE", { getWidth() - 60, 104, 60, 16 }, Justification::centredRight);
+    const float x0 = 11.0f, w = (float) getWidth() - 22.0f, y = 130.0f;
+    g.setColour (ff::line);
+    g.fillRoundedRectangle (x0, y, w, 6.0f, 3.0f);
+    g.setColour (fresh ? ff::red : ff::dim);
+    g.fillRoundedRectangle (x0, y, w * v, 6.0f, 3.0f);
+    g.setColour (ff::ink);
+    g.fillEllipse (x0 + w * v - 11.0f, y - 8.0f, 22.0f, 22.0f);
+    String hint = proc.isCalibrating() ? "ROCK HEEL TO TOE NOW" : (proc.learningWhat() == MurmurProcessor::LearnExpression ? "MOVE THE PEDAL NOW" : "");
+    if (hint.isEmpty())
+    {
+        const auto& t = names::expTargets();
+        const int cur = jlimit (0, (int) t.size() - 1, roundToInt (proc.apvts.getRawParameterValue (ParamIDs::expTarget)->load()));
+        if (auto* prm = proc.apvts.getParameter (t[(size_t) cur].id)) hint = prm->getCurrentValueAsText().toUpperCase();
+    }
+    ff::label (g, hint, { 0, 148, getWidth(), 16 }, Justification::centredRight, ff::ink, 13.0f);
+    ff::label (g, "CURVE", { 0, 210, 100, 16 });
+}
+
+void ExpressionPanel::tick (double dt)
+{
+    const auto& t = names::expTargets();
+    const int cur = jlimit (0, (int) t.size() - 1, roundToInt (proc.apvts.getRawParameterValue (ParamIDs::expTarget)->load()));
+    target.setValue (String (t[(size_t) cur].label).toUpperCase());
+    target.advance (dt);
+    learn.setButtonText (proc.learningWhat() == MurmurProcessor::LearnExpression ? "MOVE IT" : "LEARN");
+    curve.setSelected (proc.pedals().curve);
+    const float v = proc.expressionLevel();
+    if (v != shown || proc.isCalibrating()) { shown = v; repaint(); }
+}
+
+// =====================================================================================
+// ActionsOverlay
+// =====================================================================================
+ActionsOverlay::ActionsOverlay()
+{
+    addAndMakeVisible (close);
+}
+
+void ActionsOverlay::resized()
+{
+    close.setBounds (getWidth() - 40 - 90, 28, 90, 32);
+}
+
+void ActionsOverlay::paint (Graphics& g)
+{
+    g.fillAll (Colour (0xff020202));
+    g.setColour (ff::ink);
+    g.setFont (ff::font (24.0f, 0.06f));
+    g.drawText ("WHAT YOUR FEET DO", 40, 28, 400, 32, Justification::centredLeft, false);
+    ff::label (g, String::fromUTF8 ("TAP = QUICK PRESS · HOLD = KEEP IT DOWN"), { 400, 28, getWidth() - 560, 32 }, Justification::centredRight);
+
+    struct Row { const char* sw; const char* murmur; const char* murk; };
+    static const Row rows[7] = {
+        { "A", "Tap turns the wet sound on or off. Hold to freeze it.", "Same: tap for wet on or off, hold to freeze it." },
+        { "B", "Tap to record a loop, tap to play it, tap to stop. Hold to add a layer.", "Same: record, play, stop. Hold to add a layer." },
+        { "C", "Tap in the tempo. Hold to save the sound to this preset.", "Same: tap the tempo, hold to save." },
+        { "D", "Tap for the next preset. Hold for the previous one.", "Same: tap next, hold previous." },
+        { "A+B", "Tap both together: both sounds on or off at once.", "Same." },
+        { "B+C", "Hold both for a second: switch to Murk.", "Hold both for a second: switch back to Murmur." },
+        { "C+D", "Hold both for a second: Keeper saves this moment.", "Same: Keeper saves this moment." } };
+
+    const int x0 = 40, colW = (getWidth() - 80 - 86) / 2;
+    ff::label (g, "IN MURMUR", { x0 + 86, 72, colW, 16 });
+    ff::label (g, "IN MURK", { x0 + 86 + colW + 16, 72, colW, 16 });
+    int y = 94;
+    for (const auto& r : rows)
+    {
+        g.setColour (ff::face);
+        g.fillRoundedRectangle ((float) x0, (float) y, (float) (getWidth() - 80), 54.0f, 10.0f);
+        auto key = Rectangle<float> ((float) x0 + 14, (float) y + 9, 56, 36);
+        g.setColour (ff::housing);
+        g.fillRoundedRectangle (key, 6.0f);
+        g.setGradientFill (ColourGradient (ff::cardHi, 0, key.getY(), ff::cardLow, 0, key.getBottom(), false));
+        g.fillRoundedRectangle (key.reduced (3.0f), 4.0f);
+        g.setColour (Colours::black);
+        g.fillRect (key.getX() + 3, key.getCentreY() - 0.5f, key.getWidth() - 6, 1.0f);
+        g.setColour (ff::ink);
+        g.setFont (ff::font (18.0f, 0.02f));
+        g.drawText (r.sw, key, Justification::centred, false);
+        g.setFont (ff::font (17.0f, 0.01f));
+        g.drawFittedText (r.murmur, x0 + 86, y + 4, colW - 8, 46, Justification::centredLeft, 2);
+        g.drawFittedText (r.murk, x0 + 86 + colW + 16, y + 4, colW - 8, 46, Justification::centredLeft, 2);
+        y += 62;
+    }
+    g.setColour (ff::dim);
+    g.setFont (ff::font (14.0f, 0.02f));
+    g.drawFittedText ("No action needs a double press. Only the two-foot holds take a full second, so they can't fire by accident. "
+                      "The expression pedal moves Clock in Murmur and Glue in Murk until you pick something else.",
+                      x0, y + 4, getWidth() - 80, 40, Justification::centredLeft, 2);
 }
 
 // =====================================================================================
@@ -699,61 +909,44 @@ void WaveCards::mouseDown (const MouseEvent& e)
 }
 
 // =====================================================================================
-// BufferStrip and Pebble
+// Pebble
 // =====================================================================================
-void BufferStrip::update (double t, double dt)
+void Pebble::update (double t, double dt, bool isPlaying, bool isDubbing, bool isFrozen, bool isRecording, float level, float lookTarget)
 {
     now = t;
+    playing = isPlaying; dubbing = isDubbing; frozen = isFrozen; recording = isRecording;
     const auto& eng = proc.getEngine();
-    const auto& loop = eng.getLoop();
-    auto& s = proc.apvts;
-    const bool wetOn = s.getRawParameterValue (ParamIDs::wetOn)->load() > 0.5f;
     const bool synth = eng.isSynthActive();
-
-    level = eng.uiInputLevel.load();
     if (level > 0.004f) lastSound = t;
+    asleep = ! playing && ! frozen && ! recording && ! synth && t - lastSound > 4.0;
 
-    if (! loop.isReady())
-        return;
-
-    playing = loop.isPlaying();
-    dubbing = playing && s.getRawParameterValue (ParamIDs::overdub)->load() > 0.5f;
-    frozen = wetOn && s.getRawParameterValue (ParamIDs::freeze)->load() > 0.5f;
-    asleep = ! playing && ! frozen && ! synth && t - lastSound > 4.0;
-
-    const int len = std::max (1, loop.length());
-    const int filled = loop.filledSamples();
-    fill = playing ? 1.0f : (float) filled / (float) len;
-    playFrac = loop.positionFraction();
-
-    // bars
-    const float* l = loop.data (0);
-    const float* r = loop.data (1);
-    const int cols = (int) peaks.size();
-    const int shownLen = playing ? len : std::max (1, filled);
-    const int shownStart = playing ? loop.origin() : (filled < len ? 0 : loop.origin());
-    const int stride = std::max (1, shownLen / cols / 64);
-    for (int c = 0; c < cols; ++c)
-    {
-        float pk = 0.0f;
-        const int s0 = (int) ((int64_t) c * shownLen / cols), s1 = (int) ((int64_t) (c + 1) * shownLen / cols);
-        for (int k = s0; k < s1; k += stride)
-        {
-            const int idx = (shownStart + k) % len;
-            pk = std::max (pk, std::max (std::fabs (l[idx]), std::fabs (r[idx])));
-        }
-        peaks[(size_t) c] += (std::min (1.0f, pk * 1.8f) - peaks[(size_t) c]) * 0.35f;
-    }
-
-    // Pebble's face
-    const float lookTarget = playing ? playFrac * 2.0f - 1.0f : (level > 0.004f ? 0.8f : 0.0f);
-    look += (lookTarget - look) * (float) (1.0 - std::exp (-dt / 0.12));
-    const float mouthTarget = dubbing ? 1.0f : jlimit (0.0f, 1.0f, (level - 0.02f) * 5.0f);
-    mouth += (mouthTarget - mouth) * (float) (1.0 - std::exp (-dt / 0.06));
+    auto ease = [dt] (float& v, float target, float tau) { v += (target - v) * (float) (1.0 - std::exp (-dt / tau)); };
+    ease (look, lookTarget, 0.12f);
+    const float mouthTarget = dubbing || recording ? 1.0f : jlimit (0.0f, 1.0f, (level - 0.02f) * 5.0f);
+    ease (mouth, mouthTarget, 0.06f);
+    ease (murk, proc.currentMode() == 1 ? 1.0f : 0.0f, 0.25f);
 
     if (synth && eng.synthNote() != lastNote) { hop = 1.0f; lastNote = eng.synthNote(); }
     if (! synth) lastNote = -1;
-    hop *= (float) std::exp (-dt / 0.12);
+
+    // footswitch presses: a little foot tap
+    const int foot = proc.uiFootPulse.load();
+    if (foot != seenFoot) { seenFoot = foot; tap = 1.0f; lastSound = t; }
+    // Keeper: a nod (happy in Murmur, reluctant in Murk)
+    const int keep = proc.uiKeepPulse.load();
+    if (keep != seenKeep) { seenKeep = keep; nod = 1.0f; lastSound = t; }
+    // mode switch: a scowl-and-flip into Murk, a relieved shake back to Murmur
+    const int mode = proc.uiModePulse.load();
+    if (mode != seenMode) { seenMode = mode; intoMurk = proc.currentMode() == 1; (intoMurk ? flip : shake) = 1.0f; lastSound = t; }
+    // the expression pedal: Pebble leans with it
+    const bool expFresh = t - proc.lastExpressionMove() < 1.5;
+    ease (lean, expFresh ? proc.expressionLevel() * 2.0f - 1.0f : 0.0f, 0.15f);
+
+    const float k = (float) std::exp (-dt / 0.12);
+    hop *= k; tap *= (float) std::exp (-dt / 0.09);
+    nod *= (float) std::exp (-dt / 0.35);
+    flip *= (float) std::exp (-dt / 0.3);
+    shake *= (float) std::exp (-dt / 0.35);
 
     if (t > nextBlink)
     {
@@ -761,81 +954,128 @@ void BufferStrip::update (double t, double dt)
         nextBlink = t + 2.5 + Random::getSystemRandom().nextDouble() * 3.0;
     }
     blinking = t < blinkUntil;
-
-    const double coreHz = eng.uiClockHz.load();
-    const double secs = (double) (playing ? len : filled) / std::max (1000.0, coreHz);
-    status = asleep ? "ASLEEP" : dubbing ? "DUBBING" : playing ? "PLAYING" : frozen ? "FROZEN" : "LISTENING";
-    detail = String (secs, 1) + (playing ? " S LOOP" : " S HEARD");
-    repaint();
 }
 
-void BufferStrip::paintPebble (Graphics& g, Rectangle<float> a)
+void Pebble::paint (Graphics& g, Rectangle<float> a) const
 {
-    // Pebble from Flip Fella, drawn in its 200 unit space and scaled to fit.
+    // Pebble from Flip Fella, drawn in its 200 unit space and scaled to fit
     const float s = a.getWidth() / 140.0f;
     const float speed = playing ? 5.0f : 2.4f;
     const float bob = asleep ? 0.0f : (playing ? 3.0f : 1.5f) * (float) std::sin (now * speed);
     const float breathe = asleep ? 1.0f + 0.025f * (float) std::sin (now * 1.6) : 1.0f;
-    const float dy = bob - hop * 14.0f;
-    const auto tf = AffineTransform::translation (-100.0f, -100.0f).scaled (s * breathe, s / breathe)
-                        .translated (a.getCentreX(), a.getCentreY() + 6.0f * s);
+    const float nodDip = nod * 10.0f * (float) std::sin ((1.0f - nod) * 12.0f);
+    const float dy = bob - hop * 14.0f - tap * 6.0f + std::max (0.0f, nodDip) * (murk > 0.5f ? 0.5f : 1.0f);
+    const float squash = 1.0f - 0.25f * flip * (float) std::cos ((1.0f - flip) * 9.0f);       // the flip: squash and spring
+    const float wobble = shake * 0.22f * (float) std::sin ((1.0f - shake) * 40.0f);             // the shake: side to side
+    const float tilt = lean * 0.12f + wobble;
+    const auto tf = AffineTransform::translation (-100.0f, -100.0f).scaled (s * breathe, s / breathe * squash)
+                        .rotated (tilt).translated (a.getCentreX(), a.getCentreY() + 6.0f * s);
     auto ell = [&] (float cx, float cy, float rx, float ry, Colour col)
     {
         Path p; p.addEllipse (cx - rx, cy - ry, rx * 2, ry * 2);
         g.setColour (col); g.fillPath (p, tf);
     };
+    auto rect = [&] (float x, float y, float w, float h, Colour col)
+    {
+        Path p; p.addRectangle (x, y, w, h);
+        g.setColour (col); g.fillPath (p, tf);
+    };
     auto stroke = [&] (Path& p, float w) { g.setColour (ff::faceInk); g.strokePath (p, PathStrokeType (w, PathStrokeType::curved, PathStrokeType::rounded), tf); };
 
-    ell (107, 109 + dy, 58, 48, ff::blobShade);
-    ell (100, 100 + dy, 58, 48, ff::blob);
+    const Colour body = ff::blob.interpolatedWith (ff::murkBlob, murk), shade = ff::blobShade.interpolatedWith (ff::murkShade, murk);
+    const float grump = murk;                    // 0 calm, 1 grumpy
+    const float bodyY = 100.0f + 2.0f * grump;
+    ell (107, bodyY + 9 + dy, 58, 48 - 2 * grump, shade);
+    ell (100, bodyY + dy, 58, 48 - 2 * grump, body);
 
-    // eyes
+    const float eyeY = 92.0f + 4.0f * grump;
     if (asleep || blinking)
     {
         for (float ex : { 80.0f, 120.0f })
         {
-            Path lid; lid.startNewSubPath (ex - 12, 94 + dy); lid.quadraticTo (ex, 102 + dy, ex + 12, 94 + dy);
+            Path lid; lid.startNewSubPath (ex - 12, eyeY + 2 + dy); lid.quadraticTo (ex, eyeY + 10 + dy, ex + 12, eyeY + 2 + dy);
             stroke (lid, 6.0f);
         }
     }
-    else if (frozen && ! playing)
+    else if (flip > 0.3f) // scowling as the card flips into Murk: eyes screwed shut
+    {
+        for (float ex : { 80.0f, 120.0f })
+        {
+            Path lid; lid.startNewSubPath (ex - 14, eyeY + 6 + dy); lid.lineTo (ex + 14, eyeY + 6 + dy);
+            stroke (lid, 6.0f);
+        }
+    }
+    else if (frozen && ! playing && grump < 0.5f)
     {
         for (float ex : { 80.0f, 120.0f }) // happy, squinting
         {
-            Path lid; lid.startNewSubPath (ex - 12, 98 + dy); lid.quadraticTo (ex, 84 + dy, ex + 12, 98 + dy);
+            Path lid; lid.startNewSubPath (ex - 12, eyeY + 6 + dy); lid.quadraticTo (ex, eyeY - 8 + dy, ex + 12, eyeY + 6 + dy);
             stroke (lid, 6.0f);
         }
     }
     else
     {
-        const float er = dubbing ? 16.5f : 14.0f, pr = dubbing ? 8.0f : 7.0f;
+        const float er = (dubbing || recording ? 16.5f : 14.0f) - grump, pr = dubbing || recording ? 8.0f : 7.0f - grump;
         for (float ex : { 80.0f, 120.0f })
         {
-            ell (ex, 92 + dy, er, er, ff::eye);
-            ell (ex + look * 5.0f, 94 + dy, pr, pr, ff::faceInk);
+            ell (ex, eyeY + dy, er, er, ff::eye);
+            ell (ex + look * 5.0f, eyeY + 2 + 2 * grump + dy, pr, pr, ff::faceInk);
+        }
+        if (grump > 0.01f) // heavy lids: Murk's eyes are half shut
+        {
+            const float lidH = 15.0f * grump * (dubbing || recording ? 0.5f : 1.0f);
+            rect (64, eyeY - er - 1 + dy, 32, lidH, body);
+            rect (104, eyeY - er - 1 + dy, 32, lidH, body);
         }
     }
 
+    if (grump > 0.01f && ! asleep) // the brows: angled down to the middle
+    {
+        const float lift = nod > 0.3f ? 4.0f : 0.0f;
+        Path l; l.startNewSubPath (64, eyeY - 12 - lift + dy); l.lineTo (64 + 32 * grump, eyeY - 12 + 9 * grump - lift + dy);
+        Path r; r.startNewSubPath (136, eyeY - 12 - lift + dy); r.lineTo (136 - 32 * grump, eyeY - 12 + 9 * grump - lift + dy);
+        stroke (l, 8.0f * grump);
+        stroke (r, 8.0f * grump);
+    }
+
     // mouth
+    const float mouthY = 120.0f + 6.0f * grump;
     if (asleep)
     {
-        Path m; m.startNewSubPath (94, 124 + dy); m.lineTo (106, 124 + dy);
+        Path m; m.startNewSubPath (94, mouthY + 4 + dy); m.lineTo (106, mouthY + 4 + dy);
         stroke (m, 6.0f);
     }
     else if (mouth > 0.15f)
     {
-        ell (100, 124 + dy, 7.0f + 3.0f * mouth, 4.0f + 8.0f * mouth, ff::faceInk);
+        ell (100, mouthY + 4 + dy, 7.0f + 3.0f * mouth, 4.0f + (8.0f - 3.0f * grump) * mouth, ff::faceInk);
+    }
+    else if (flip > 0.3f)
+    {
+        Path m; m.startNewSubPath (86, mouthY + 8 + dy); m.lineTo (114, mouthY + 8 + dy);
+        stroke (m, 6.0f);
     }
     else
     {
-        Path m; m.startNewSubPath (90, 120 + dy); m.quadraticTo (100, playing ? 132 + dy : 128 + dy, 110, 120 + dy);
+        // Murmur smiles; Murk's mouth turns down into a flat frown
+        const float curve = (playing ? 12.0f : 8.0f) * (1.0f - grump) - 7.0f * grump + (nod > 0.2f ? 4.0f : 0.0f);
+        Path m; m.startNewSubPath (90 - 2 * grump, mouthY + dy); m.quadraticTo (100, mouthY + curve + dy, 110 + 2 * grump, mouthY + dy);
         stroke (m, 6.0f);
+    }
+
+    if (shake > 0.2f) // the relieved shake throws off a little murk
+    {
+        g.setColour (ff::dim.withAlpha (shake));
+        for (float side : { -1.0f, 1.0f })
+        {
+            Path w; w.startNewSubPath (100 + side * 70, 80); w.quadraticTo (100 + side * 78, 95, 100 + side * 70, 110);
+            g.strokePath (w, PathStrokeType (4.0f, PathStrokeType::curved, PathStrokeType::rounded), tf);
+        }
     }
 
     // drifting z's while asleep
     if (asleep)
     {
-        g.setFont (ff::font (11.0f + 4.0f, 0.0f));
+        g.setFont (ff::font (15.0f, 0.0f));
         for (int k = 0; k < 3; ++k)
         {
             const float ph = (float) std::fmod (now * 0.5 + k / 3.0, 1.0);
@@ -846,6 +1086,87 @@ void BufferStrip::paintPebble (Graphics& g, Rectangle<float> a)
     }
 }
 
+// =====================================================================================
+// BufferStrip
+// =====================================================================================
+void BufferStrip::update (double t, double dt)
+{
+    now = t;
+    const auto& eng = proc.getEngine();
+    const auto& loop = eng.getLoop();
+    auto& s = proc.apvts;
+    auto v = [&] (const char* id) { return s.getRawParameterValue (id)->load(); };
+    const bool wetOn = v (ParamIDs::wetOn) > 0.5f;
+
+    level = eng.uiInputLevel.load();
+    if (! loop.isReady())
+        return;
+
+    playing = loop.isPlaying();
+    recording = loop.isRecording();
+    dubbing = playing && v (ParamIDs::overdub) > 0.5f;
+    frozen = wetOn && v (ParamIDs::freeze) > 0.5f;
+    radio = proc.currentMode() == 1 && roundToInt (v (ParamIDs::murkLoop)) == 1;
+    tuning = murmur::MurkLoop::stationPos (v (ParamIDs::loopModify)) / 4.0f;
+
+    const int len = std::max (1, loop.length());
+    const int filled = loop.filledSamples();
+    fill = playing || recording ? 1.0f : (float) filled / (float) len;
+    playFrac = loop.positionFraction();
+
+    // bars
+    const float* l = loop.data (0);
+    const float* r = loop.data (1);
+    const int cols = (int) peaks.size();
+    const int shownLen = playing ? len : std::max (1, filled);
+    const int shownStart = playing ? loop.origin() : (filled < len || recording ? 0 : loop.origin());
+    const int stride = std::max (1, shownLen / cols / 64);
+    for (int c = 0; c < cols; ++c)
+    {
+        float pk = 0.0f;
+        const int s0 = (int) ((int64_t) c * shownLen / cols), s1 = (int) ((int64_t) (c + 1) * shownLen / cols);
+        for (int k = s0; k < s1; k += stride)
+        {
+            const int i = (shownStart + k) % len;
+            pk = std::max (pk, std::max (std::fabs (l[i]), std::fabs (r[i])));
+        }
+        peaks[(size_t) c] += (std::min (1.0f, pk * 1.8f) - peaks[(size_t) c]) * 0.35f;
+    }
+
+    look = playing ? playFrac * 2.0f - 1.0f : (level > 0.004f ? 0.8f : 0.0f);
+    pebble.update (t, dt, playing, dubbing, frozen, recording, level, look);
+
+    const double coreHz = eng.uiClockHz.load();
+    const double secs = (double) (playing ? len : filled) / std::max (1000.0, coreHz);
+    status = pebble.isAsleep() ? "ASLEEP" : recording ? "RECORDING" : dubbing ? "DUBBING" : playing ? "PLAYING" : frozen ? "FROZEN" : "LISTENING";
+    detail = String (secs, 1) + (playing ? " S LOOP" : (recording ? " S SO FAR" : " S HEARD"));
+    if (t - proc.uiMessageAt < 2.5 && proc.uiMessage.isNotEmpty()) detail = proc.uiMessage;
+    repaint();
+}
+
+void BufferStrip::paintRadio (Graphics& g, Rectangle<float> a) const
+{
+    g.setColour (ff::housing);
+    g.fillRoundedRectangle (a, 8.0f);
+    const float x0 = a.getX() + 24.0f, w = a.getWidth() - 48.0f;
+    for (int i = 0; i <= 20; ++i)
+    {
+        const bool major = i % 5 == 0;
+        const float x = x0 + w * (float) i / 20.0f;
+        g.setColour (major ? ff::ink : ff::line);
+        g.fillRect (x - (major ? 1.5f : 1.0f), a.getY() + (major ? 10.0f : 16.0f), major ? 3.0f : 2.0f, major ? 14.0f : 6.0f);
+    }
+    const int nearest = roundToInt (tuning * 4.0f);
+    for (int st = 0; st < murmur::MurkLoop::kStations; ++st)
+    {
+        const float x = x0 + w * (float) st / 4.0f;
+        ff::label (g, murmur::MurkLoop::stationName (st), Rectangle<float> (x - 60.0f, a.getY() + 34.0f, 120.0f, 18.0f).toNearestInt(),
+                   Justification::centred, st == nearest && std::abs (tuning * 4.0f - (float) st) < 0.15f ? ff::ink : ff::dim, 14.0f);
+    }
+    g.setColour (ff::red);
+    g.fillRect (x0 + w * tuning - 1.5f, a.getY() + 4.0f, 3.0f, a.getHeight() - 8.0f);
+}
+
 void BufferStrip::paint (Graphics& g)
 {
     auto r = getLocalBounds();
@@ -853,7 +1174,7 @@ void BufferStrip::paint (Graphics& g)
     g.fillRoundedRectangle (r.toFloat(), 12.0f);
 
     auto inner = r.reduced (18, 14);
-    paintPebble (g, inner.removeFromLeft (76).toFloat());
+    pebble.paint (g, inner.removeFromLeft (76).toFloat());
     inner.removeFromLeft (18);
 
     auto info = inner.removeFromLeft (120);
@@ -861,6 +1182,12 @@ void BufferStrip::paint (Graphics& g)
     ff::label (g, status, info.removeFromTop (30), Justification::centredLeft, ff::ink, 22.0f);
     ff::label (g, detail, info.removeFromTop (18));
     inner.removeFromLeft (18);
+
+    if (radio)
+    {
+        paintRadio (g, inner.withSizeKeepingCentre (inner.getWidth(), 64).toFloat());
+        return;
+    }
 
     auto bars = inner.withSizeKeepingCentre (inner.getWidth(), 60).toFloat();
     const int cols = (int) peaks.size();
@@ -871,7 +1198,7 @@ void BufferStrip::paint (Graphics& g)
     for (int c = 0; c < cols; ++c)
     {
         const float h = std::max (4.0f, peaks[(size_t) c] * 60.0f);
-        Colour col = playing ? (c <= playCol ? ff::ink : ff::faint) : (c < fillCol ? ff::dim : ff::card);
+        Colour col = playing ? (c <= playCol ? ff::ink : ff::faint) : (c < fillCol ? (recording ? ff::red : ff::dim) : ff::card);
         if (dubbing && c <= playCol) col = ff::ink;
         g.setColour (col);
         g.fillRoundedRectangle (bars.getX() + (float) c * step, bars.getCentreY() - h * 0.5f, barW, h, 2.0f);
@@ -894,6 +1221,8 @@ MurmurEditor::MurmurEditor (MurmurProcessor& p)
       presets (p),
       wetMode (p.apvts, ParamIDs::wetMode, { "REVERB", "DELAY", "SLIP" }),
       loopMode (p.apvts, ParamIDs::loopMode, { "ENV", "TAPE", "STRETCH" }),
+      murkWet (p.apvts, ParamIDs::murkWet, { "SOUP", "RELAY", "FLIP" }),
+      murkLoop (p.apvts, ParamIDs::murkLoop, { "BURST", "RADIO", "MASK" }),
       routing (p.apvts, ParamIDs::routing, { "IN", "BOTH", "LOOP" }),
       time (p.apvts, ParamIDs::time, "Time"),
       wetModify (p.apvts, ParamIDs::wetModify, "Modify"),
@@ -901,21 +1230,30 @@ MurmurEditor::MurmurEditor (MurmurProcessor& p)
       loopModify (p.apvts, ParamIDs::loopModify, "Modify"),
       clock (p.apvts, p),
       mix (p.apvts, ParamIDs::mix, "Mix"),
-      wetSwitch (p.apvts, ParamIDs::wetOn, ParamIDs::freeze, "WET", "TAP ON / OFF", "HOLD FREEZE", "FROZEN"),
-      loopSwitch (p.apvts, ParamIDs::loopOn, ParamIDs::overdub, "LOOP", "TAP PLAY / LISTEN", "HOLD OVERDUB", "DUBBING"),
+      glue (p.apvts, ParamIDs::glue, "Glue"),
+      wetSwitch (p, 0, "WET", "TAP ON / OFF", "HOLD FREEZE"),
+      loopSwitch (p, 1, "LOOP", "TAP REC / PLAY / STOP", "HOLD OVERDUB"),
       strip (p),
       width (p.apvts, ParamIDs::width, "Width"),
       tone (p.apvts, ParamIDs::tone, "Tone"),
+      eqTilt (p.apvts, ParamIDs::eqTilt, "EQ tilt"),
       fade (p.apvts, ParamIDs::fade, "Fade"),
       direct (p.apvts, ParamIDs::direct, "Direct loop"),
+      blend (p.apvts, ParamIDs::direct, "Blend"),
       balance (p.apvts, ParamIDs::balance, "Balance"),
+      glueDial (p.apvts, ParamIDs::glue, "Glue"),
+      crossDial (p.apvts, ParamIDs::cross, "Cross"),
+      volume (p.apvts, ParamIDs::outGain, "Volume"),
       sync (p.apvts, ParamIDs::sync, { "UNSYNCED", "LOOP FOLLOWS WET", "WET FOLLOWS LOOP" }),
       spreadSolo (p.apvts, ParamIDs::spreadSolo, { "BOTH", "WET", "LOOP" }),
       halfLength (p.apvts, ParamIDs::halfLength, { "HALF", "FULL" }),
       stepSet (p.apvts, ParamIDs::stepSet, { "PEDAL", "OCTAVES", "4THS + 5THS", "SEMITONES" }),
+      crossSource (p.apvts, ParamIDs::crossSource, { "INPUT", "WET", "LOOP" }),
+      eqOn (p.apvts, ParamIDs::eqOn, { "WET", "BOTH", "LOOP" }),
       inGain (p.apvts, ParamIDs::inGain, "Input"),
       outGain (p.apvts, ParamIDs::outGain, "Output"),
       bufferSeconds (p.apvts, ParamIDs::bufferSeconds, "Max loop at 64 kHz"),
+      expressionPanel (p),
       bounce (p.apvts, ParamIDs::bounce, { "BOUNCE", "RAMP" }),
       sweep (p.apvts, ParamIDs::sweep, { "TOP", "BOTTOM" }),
       modSource (p.apvts, ParamIDs::modSource, { "RAMP", "EXPRESSION" }),
@@ -937,10 +1275,39 @@ MurmurEditor::MurmurEditor (MurmurProcessor& p)
     lnf.setColour (TextButton::buttonColourId, ff::bg);
     lnf.setColour (TextButton::textColourOffId, ff::ink);
     lnf.setColour (ComboBox::outlineColourId, ff::line);
+    lnf.setColour (PopupMenu::backgroundColourId, ff::face);
+    lnf.setColour (PopupMenu::textColourId, ff::ink);
+    lnf.setColour (PopupMenu::highlightedBackgroundColourId, ff::ink);
+    lnf.setColour (PopupMenu::highlightedTextColourId, ff::bg);
 
     addAndMakeVisible (pages);
     pages.onPick = [this] (int i) { showPage (i); };
     addAndMakeVisible (presets);
+
+    // the mode card: click to switch, or hold B+C for a second
+    modeButton.card.setTextHeight (22.0f);
+    modeButton.onClick = [this] (const MouseEvent&) { proc.switchMode(); };
+    addAndMakeVisible (modeButton);
+
+    // KEEP: click to keep this moment, right-click for notes, export and the Keeper switch
+    keepButton.card.setTextHeight (14.0f);
+    keepButton.card.setValue ("KEEP");
+    keepButton.onClick = [this] (const MouseEvent& e) { if (e.mods.isPopupMenu()) keeperMenu(); else proc.keepNow(); };
+    addAndMakeVisible (keepButton);
+    addChildComponent (noteEditor);
+    noteEditor.setTextToShowWhenEmpty ("Add a note (optional), Enter to save", ff::faint);
+    noteEditor.setFont (FontOptions (13.0f));
+    noteEditor.setIndents (10, 8);
+    noteEditor.setColour (TextEditor::backgroundColourId, ff::bg);
+    noteEditor.setColour (TextEditor::textColourId, ff::ink);
+    noteEditor.setColour (TextEditor::outlineColourId, ff::line);
+    noteEditor.setColour (TextEditor::focusedOutlineColourId, ff::ink);
+    noteEditor.setColour (CaretComponent::caretColourId, ff::ink);
+    noteEditor.setInputRestrictions (200);
+    noteEditor.onReturnKey = [this] { closeNote (true); };
+    noteEditor.onEscapeKey = [this] { closeNote (false); };
+    noteEditor.onTextChange = [this] { noteUntil = Time::getMillisecondCounterHiRes() * 0.001 + 20.0; };
+    seenKeep = proc.uiKeepPulse.load();
 
     wetCard.setTextHeight (48.0f);
     loopCard.setTextHeight (48.0f);
@@ -951,17 +1318,25 @@ MurmurEditor::MurmurEditor (MurmurProcessor& p)
     noteCard.setTextHeight (36.0f);
     octaveCard.setTextHeight (30.0f);
 
-    panelComps = { &wetCard, &loopCard, &rateCard, &khzCard, &wetMode, &loopMode, &routing, &time, &wetModify,
+    panelComps = { &wetCard, &loopCard, &rateCard, &khzCard, &routing, &time, &wetModify,
                    &length, &loopModify, &clock, &mix, &wetSwitch, &loopSwitch, &strip };
+    murmurPanel = { &wetMode, &loopMode };
+    murkPanel = { &murkWet, &murkLoop, &glue };
 
     struct Sw { const char* id; const char* name; };
     for (auto s : { Sw { ParamIDs::miso, "MISO" }, Sw { ParamIDs::spread, "SPREAD" }, Sw { ParamIDs::dryKill, "DRY KILL" },
                     Sw { ParamIDs::trails, "TRAILS" }, Sw { ParamIDs::latch, "LATCH" }, Sw { ParamIDs::noDub, "NO DUB" },
                     Sw { ParamIDs::smoothClock, "SMOOTH" }, Sw { ParamIDs::classic, "CLASSIC" } })
-        deepComps.add (switches.add (new CardToggle (p.apvts, s.id, s.name, CardToggle::Style::OnOffBeside)));
-    for (auto* c : std::initializer_list<Component*> { &width, &tone, &fade, &direct, &balance, &sync, &spreadSolo,
-                                                       &halfLength, &stepSet, &resetHidden, &inGain, &outGain, &bufferSeconds })
+        murmurDeep.add (switches.add (new CardToggle (p.apvts, s.id, s.name, CardToggle::Style::OnOffBeside)));
+    // In Murk, HALF and DRY GLUE take the places of NO DUB and CLASSIC
+    for (auto s : { Sw { ParamIDs::miso, "MISO" }, Sw { ParamIDs::spread, "SPREAD" }, Sw { ParamIDs::dryKill, "DRY KILL" },
+                    Sw { ParamIDs::trails, "TRAILS" }, Sw { ParamIDs::latch, "LATCH" }, Sw { ParamIDs::halfLength, "HALF" },
+                    Sw { ParamIDs::smoothClock, "SMOOTH" }, Sw { ParamIDs::dryGlue, "DRY GLUE" } })
+        murkDeep.add (murkSwitches.add (new CardToggle (p.apvts, s.id, s.name, CardToggle::Style::OnOffBeside)));
+    for (auto* c : std::initializer_list<Component*> { &width, &fade, &balance, &sync, &spreadSolo, &stepSet, &resetHidden, &inGain, &bufferSeconds })
         deepComps.add (c);
+    for (auto* c : std::initializer_list<Component*> { &tone, &direct, &halfLength, &outGain }) murmurDeep.add (c);
+    for (auto* c : std::initializer_list<Component*> { &eqTilt, &blend, &glueDial, &crossDial, &volume, &crossSource, &eqOn }) murkDeep.add (c);
     resetHidden.onClick = [this] { proc.resetHiddenOptions(); };
 
     for (auto s : { Sw { ParamIDs::rampTime, "TIME" }, Sw { ParamIDs::rampWetMod, "WET MOD" }, Sw { ParamIDs::rampClock, "CLOCK" },
@@ -972,6 +1347,63 @@ MurmurEditor::MurmurEditor (MurmurProcessor& p)
                                                        &noteCard, &octaveCard, &synthGate, &attack, &decay, &sustain,
                                                        &release, &glide, &rootDown, &rootUp })
         motionComps.add (c);
+
+    // ---- Pedal page ----
+    for (int k = 0; k < 4; ++k) pedalComps.add (pedalCards.add (new PedalCard (p, k)));
+    for (auto* c : std::initializer_list<Component*> { &tableMode, &showActions, &tryBoth, &tryMode, &tryKeep, &keepLearn, &footDevice,
+                                                       &pedalMap, &keepExport, &footDefaults, &keeperContext, &expressionPanel })
+        pedalComps.add (c);
+    tableMode.onPick = [this] (int i) { pedalTable = i; tableMode.setSelected (i); repaint(); };
+    showActions.onClick = [this] { showOverlay (true); };
+    overlay.close.onClick = [this] { showOverlay (false); };
+    addChildComponent (overlay);
+    tryBoth.onClick = [this]
+    {
+        // the same as tapping A and B together
+        const bool anyOn = proc.apvts.getRawParameterValue (ParamIDs::wetOn)->load() > 0.5f
+                        || proc.apvts.getRawParameterValue (ParamIDs::loopOn)->load() > 0.5f
+                        || proc.apvts.getRawParameterValue (ParamIDs::loopRec)->load() > 0.5f;
+        const char* const offIds[5] = { ParamIDs::wetOn, ParamIDs::loopOn, ParamIDs::loopRec, ParamIDs::freeze, ParamIDs::overdub };
+        for (int i = 0; i < (anyOn ? 5 : 2); ++i)
+            if (auto* prm = proc.apvts.getParameter (offIds[i]))
+            {
+                prm->beginChangeGesture();
+                prm->setValueNotifyingHost (anyOn ? 0.0f : 1.0f);
+                prm->endChangeGesture();
+            }
+    };
+    tryMode.onClick = [this] { proc.switchMode(); };
+    tryKeep.onClick = [this] { proc.keepNow(); };
+    keepLearn.onClick = [this] { if (proc.learningWhat() == MurmurProcessor::LearnKeeper) proc.cancelLearn(); else proc.learnKeeper(); };
+    keepExport.onClick = [this] { proc.exportKeepers(); };
+    footDefaults.onClick = [this] { proc.resetFootswitches(); };
+    keeperContext.onPick = [this] (int i) { proc.setKeeperLive (i == 1); keeperContext.setSelected (i); };
+    keeperContext.setSelected (proc.pedals().keeperLive ? 1 : 0);
+    footDevice.onClick = [this]
+    {
+        PopupMenu m;
+        m.addItem (-1, proc.footInputStatus(), false, false);
+        m.addSeparator();
+        const auto chosen = proc.pedals().footDevice;
+        m.addItem (10, "Find my footswitch automatically", true, chosen.isEmpty());
+        const auto devices = DirectMidiInput::deviceNames();
+        for (int i = 0; i < devices.size() && i < 40; ++i)
+            m.addItem (100 + i, "Use " + devices[i], true, chosen == devices[i]);
+        m.addItem (11, "Only from a MIDI track in Ableton", true, chosen == "none");
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (&footDevice), [this, devices] (int r)
+        {
+            if (r == 10) proc.setFootDevice ({});
+            else if (r == 11) proc.setFootDevice ("none");
+            else if (r >= 100 && r - 100 < devices.size()) proc.setFootDevice (devices[r - 100]);
+        });
+    };
+    pedalMap.onClick = [this]
+    {
+        PopupMenu m;
+        m.addItem (300, "Off", true, proc.pedals().pedalMapChannel == 0);
+        for (int ch = 1; ch <= 16; ++ch) m.addItem (300 + ch, "Channel " + String (ch), true, proc.pedals().pedalMapChannel == ch);
+        m.showMenuAsync (PopupMenu::Options().withTargetComponent (&pedalMap), [this] (int r) { if (r >= 300) proc.setPedalMapChannel (r - 300); });
+    };
 
     tap.getProperties().set ("tap", true);
     tap.onClick = [this] { proc.tapTempo(); };
@@ -988,9 +1420,9 @@ MurmurEditor::MurmurEditor (MurmurProcessor& p)
     rootDown.onClick = [shiftRoot] { shiftRoot (-12); };
     rootUp.onClick = [shiftRoot] { shiftRoot (12); };
 
-    for (auto* c : panelComps) addChildComponent (c);
-    for (auto* c : deepComps) addChildComponent (c);
-    for (auto* c : motionComps) addChildComponent (c);
+    for (auto* list : { &panelComps, &murmurPanel, &murkPanel, &deepComps, &murmurDeep, &murkDeep, &motionComps, &pedalComps })
+        for (auto* c : *list) addChildComponent (c);
+    overlay.toFront (false);
 
     setSize (960, 640);
     showPage (0);
@@ -1008,11 +1440,72 @@ void MurmurEditor::showPage (int p)
 {
     page = p;
     pages.setSelected (p);
-    for (auto* c : panelComps) c->setVisible (page == 0);
-    for (auto* c : deepComps) c->setVisible (page == 1);
-    for (auto* c : motionComps) c->setVisible (page == 2);
+    if (p != PedalPage) overlay.setVisible (false);
+    updateVisibility();
     resized();
     repaint();
+}
+
+void MurmurEditor::showOverlay (bool show)
+{
+    overlay.setVisible (show && page == PedalPage);
+    if (show) overlay.toFront (false);
+    repaint();
+}
+
+void MurmurEditor::updateVisibility()
+{
+    shownMode = proc.currentMode();
+    const bool murk = shownMode == 1;
+    for (auto* c : panelComps) c->setVisible (page == PanelPage);
+    for (auto* c : murmurPanel) c->setVisible (page == PanelPage && ! murk);
+    for (auto* c : murkPanel) c->setVisible (page == PanelPage && murk);
+    for (auto* c : deepComps) c->setVisible (page == DeepPage);
+    for (auto* c : murmurDeep) c->setVisible (page == DeepPage && ! murk);
+    for (auto* c : murkDeep) c->setVisible (page == DeepPage && murk);
+    for (auto* c : motionComps) c->setVisible (page == MotionPage);
+    for (auto* c : pedalComps) c->setVisible (page == PedalPage);
+    if (pedalTable < 0 || page != PedalPage) pedalTable = shownMode;
+    tableMode.setSelected (pedalTable);
+}
+
+void MurmurEditor::keeperMenu()
+{
+    PopupMenu m;
+    m.addItem (1, "Add a note to Keeper No. " + String (proc.lastKeeper()), proc.lastKeeper() > 0);
+    m.addItem (2, "Export for Claude");
+    m.addItem (3, "Open the Keepers folder");
+    m.addSeparator();
+    m.addItem (5, "Tag Keepers as Live", true, proc.pedals().keeperLive);
+    m.addItem (4, "Learn a Keeper footswitch");
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&keepButton), [this] (int r)
+    {
+        if (r == 1)
+        {
+            noteNumber = proc.lastKeeper();
+            noteEditor.clear();
+            noteEditor.setVisible (true);
+            noteEditor.grabKeyboardFocus();
+            noteUntil = Time::getMillisecondCounterHiRes() * 0.001 + 20.0;
+        }
+        else if (r == 2) proc.exportKeepers();
+        else if (r == 3) proc.openKeepersFolder();
+        else if (r == 4) proc.learnKeeper();
+        else if (r == 5) { proc.setKeeperLive (! proc.pedals().keeperLive); keeperContext.setSelected (proc.pedals().keeperLive ? 1 : 0); }
+    });
+}
+
+void MurmurEditor::closeNote (bool save)
+{
+    if (save && noteEditor.getText().trim().isNotEmpty())
+    {
+        proc.addKeeperNote (noteNumber, noteEditor.getText());
+        proc.uiMessage = "NOTED";
+        proc.uiMessageAt = Time::getMillisecondCounterHiRes() * 0.001;
+    }
+    noteEditor.setVisible (false);
+    noteEditor.clear();
+    noteUntil = 0.0;
 }
 
 void MurmurEditor::section (Graphics& g, Rectangle<int> r) const
@@ -1026,31 +1519,56 @@ void MurmurEditor::paint (Graphics& g)
     g.fillAll (ff::bg);
     g.setColour (ff::ink);
     g.setFont (ff::font (26.0f, 0.04f));
-    g.drawText ("MURMUR", 20, 20, 140, 40, Justification::centredLeft, false);
-    ff::label (g, "MICRO-LOOPS AND MOODY SPACES", { 150, 20, 260, 40 });
+    g.drawText ("MURMUR", 20, 20, 120, 40, Justification::centredLeft, false);
+    g.setColour (ff::dim);
+    g.setFont (ff::font (12.0f, 0.06f));
+    g.drawText ("MODE", 246, 26, 60, 14, Justification::centredLeft, false);
+    g.drawText ("HOLD B+C", 246, 40, 60, 14, Justification::centredLeft, false);
+    const bool murk = proc.currentMode() == 1;
 
-    if (page == 0)
+    if (page == PanelPage)
     {
         section (g, secA); section (g, secB); section (g, secC);
         ff::label (g, "WET CHANNEL", { 36, 92, 200, 16 });
         ff::label (g, "CLOCK", { 356, 92, 200, 16 });
         ff::label (g, "MICRO-LOOPER", { 656, 92, 200, 16 });
-        ff::label (g, interval, { 340, 366, 280, 20 }, Justification::centred, ff::ink, 15.0f);
+        ff::label (g, interval, murk ? Rectangle<int> { 340, 342, 280, 20 } : Rectangle<int> { 340, 366, 280, 20 },
+                   Justification::centred, ff::ink, 15.0f);
     }
-    else if (page == 1)
+    else if (page == DeepPage)
     {
         section (g, secA); section (g, secB);
         ff::label (g, "HIDDEN OPTIONS", { 36, 92, 300, 16 });
-        ff::label (g, "CHANNEL SYNC", { 36, 266, 300, 16 });
-        ff::label (g, "SPREAD ON", { 36, 334, 200, 16 });
-        ff::label (g, "LOOP LENGTH", { 377, 334, 200, 16 });
-        ff::label (g, "CLOCK STEPS", { 36, 402, 300, 16 });
+        if (murk)
+        {
+            g.setColour (ff::card);
+            g.fillRect (36, 256, 558, 2);
+            ff::label (g, "CROSS FROM", { 386, 274, 200, 16 });
+            ff::label (g, "YOUR PLAYING MOVES THE VOLUME AND PITCH", { 386, 344, 220, 14 }, Justification::centredLeft, ff::dim, 11.0f);
+            ff::label (g, "EQ ON", { 36, 412, 200, 16 });
+            ff::label (g, "SPREAD ON", { 320, 412, 200, 16 });
+            ff::label (g, "CHANNEL SYNC", { 36, 480, 300, 16 });
+            ff::label (g, "CLOCK STEPS", { 36, 548, 300, 16 });
+        }
+        else
+        {
+            ff::label (g, "CHANNEL SYNC", { 36, 266, 300, 16 });
+            ff::label (g, "SPREAD ON", { 36, 334, 200, 16 });
+            ff::label (g, "LOOP LENGTH", { 377, 334, 200, 16 });
+            ff::label (g, "CLOCK STEPS", { 36, 402, 300, 16 });
+        }
         ff::label (g, "SWITCHES", { 646, 92, 200, 16 });
         g.setColour (ff::card);
         g.fillRect (646, 300, 278, 2);
         ff::label (g, "LEVELS", { 646, 314, 200, 16 });
+        if (murk)
+        {
+            g.setColour (ff::dim);
+            g.setFont (ff::font (11.0f, 0.08f));
+            g.drawFittedText ("HALF AND DRY GLUE TAKE THE PLACES OF NO DUB AND CLASSIC IN MURK", 646, 446, 278, 32, Justification::topLeft, 2);
+        }
     }
-    else
+    else if (page == MotionPage)
     {
         section (g, secA); section (g, secB); section (g, secC);
         ff::label (g, String::fromUTF8 ("RAMPING · KNOBS THAT MOVE"), { 36, 92, 400, 16 });
@@ -1067,14 +1585,68 @@ void MurmurEditor::paint (Graphics& g)
         auto* root = proc.apvts.getParameter (ParamIDs::synthRoot);
         ff::label (g, root->getCurrentValueAsText(), { 727, 548, 197, 16 }, Justification::centredRight, ff::ink);
     }
+    else // Pedal
+    {
+        section (g, secA); section (g, secB);
+        ff::label (g, "FOOTSWITCHES", { 36, 92, 200, 16 });
+        g.setColour (ff::card);
+        g.fillRect (36, 356, 568, 2);
+        ff::label (g, "TWO AT ONCE", { 36, 366, 200, 16 });
+        struct Combo { const char* keys; const char* job; };
+        const int t = pedalTable < 0 ? proc.currentMode() : pedalTable;
+        const Combo combos[3] = { { "A + B TAP", "BOTH CHANNELS ON / OFF" },
+                                  { "B + C HOLD 1 S", t == 1 ? "SWITCH MODE: MURK TO MURMUR" : "SWITCH MODE: MURMUR TO MURK" },
+                                  { "C + D HOLD 1 S", "KEEPER: SAVE THIS MOMENT" } };
+        for (int i = 0; i < 3; ++i)
+        {
+            const int y = 390 + i * 44;
+            ff::label (g, combos[i].keys, { 36, y, 124, 36 }, Justification::centredLeft, ff::ink, 15.0f);
+            auto r = Rectangle<float> (164.0f, (float) y, 340.0f, 36.0f);
+            g.setColour (ff::housing);
+            g.fillRoundedRectangle (r, 6.0f);
+            g.setGradientFill (ColourGradient (ff::cardHi, 0, r.getY(), ff::cardLow, 0, r.getBottom(), false));
+            g.fillRoundedRectangle (r.reduced (3.0f), 4.0f);
+            g.setColour (Colours::black);
+            g.fillRect (r.getX() + 3.0f, r.getCentreY() - 0.5f, r.getWidth() - 6.0f, 1.0f);
+            ff::label (g, combos[i].job, r.withTrimmedLeft (12.0f).toNearestInt(), Justification::centredLeft, ff::ink, 16.0f);
+        }
+        ff::label (g, "C + D TAP HANDS THE FOOTSWITCHES TO THE NEXT MURMUR", { 36, 524, 568, 14 }, Justification::centredLeft, ff::dim, 11.0f);
+        const double now = nowSeconds();
+        if (now - proc.uiMessageAt < 3.0)
+            ff::label (g, proc.uiMessage, { 36, 552, 460, 40 }, Justification::centredLeft, ff::ink, 24.0f);
+
+        // connection, original map and Keeper
+        g.setColour (ff::card);
+        g.fillRect (646, 366, 278, 2);
+        g.setColour (proc.pedalsDirect() ? ff::green : ff::pin);
+        g.fillEllipse (646.0f, 381.0f, 10.0f, 10.0f);
+        ff::label (g, proc.pedalsDirect() ? "FOOTSWITCHES CONNECTED" : "FOOTSWITCHES VIA ABLETON", { 664, 376, 260, 20 }, Justification::centredLeft, ff::ink, 14.0f);
+        ff::label (g, "READ FROM", { 646, 404, 120, 28 });
+        ff::label (g, "ORIGINAL PEDAL MIDI MAP", { 646, 438, 160, 28 });
+        g.setColour (ff::card);
+        g.fillRect (646, 476, 278, 2);
+        ff::label (g, "KEEPER", { 646, 488, 120, 16 });
+        ff::label (g, "LEARN A KEEPER SWITCH", { 646, 560, 180, 28 });
+    }
+
+    if (noteEditor.isVisible())
+    {
+        g.setColour (ff::face);
+        g.fillRoundedRectangle (556.0f, 64.0f, 384.0f, 48.0f, 10.0f);
+    }
 }
 
 void MurmurEditor::resized()
 {
-    pages.setBounds (532, 24, 240, 32);
-    presets.setBounds (788, 24, 140, 40);
+    modeButton.setBounds (134, 22, 104, 40);
+    pages.setBounds (400, 26, 320, 32);
+    presets.setBounds (732, 24, 140, 40);
+    keepButton.setBounds (880, 24, 60, 32);
+    noteEditor.setBounds (564, 70, 368, 36);
+    overlay.setBounds (0, 76, 960, 564);
+    const bool murk = proc.currentMode() == 1;
 
-    if (page == 0)
+    if (page == PanelPage)
     {
         secA = { 20, 76, 300, 432 };
         secB = { 340, 76, 280, 432 };
@@ -1082,47 +1654,74 @@ void MurmurEditor::resized()
 
         wetCard.setBounds (36, 120, 268, 84);
         wetMode.setBounds (36, 216, 268, 32);
+        murkWet.setBounds (36, 216, 268, 32);
         time.setBounds (30, 258, 130, 146);
         wetModify.setBounds (180, 258, 130, 146);
         wetSwitch.setBounds (36, 428, 268, 64);
 
         loopCard.setBounds (656, 120, 268, 84);
         loopMode.setBounds (656, 216, 268, 32);
+        murkLoop.setBounds (656, 216, 268, 32);
         length.setBounds (650, 258, 130, 146);
         loopModify.setBounds (800, 258, 130, 146);
         loopSwitch.setBounds (656, 428, 268, 64);
 
         rateCard.setBounds (403, 116, 84, 56);
         khzCard.setBounds (493, 116, 64, 56);
-        clock.setBounds (390, 180, 180, 180);
-        routing.setBounds (356, 396, 248, 32);
-        mix.setBounds (356, 444, 248, 40);
-
+        if (murk) // room for Glue under Mix
+        {
+            clock.setBounds (400, 180, 160, 160);
+            routing.setBounds (356, 370, 248, 32);
+            mix.setBounds (356, 412, 248, 40);
+            glue.setBounds (356, 456, 248, 40);
+        }
+        else
+        {
+            clock.setBounds (390, 180, 180, 180);
+            routing.setBounds (356, 396, 248, 32);
+            mix.setBounds (356, 444, 248, 40);
+        }
         strip.setBounds (20, 524, 920, 96);
     }
-    else if (page == 1)
+    else if (page == DeepPage)
     {
         secA = { 20, 76, 590, 544 };
         secB = { 630, 76, 310, 544 };
         resetHidden.setBounds (500, 86, 94, 28);
         int x = 36;
-        for (auto* d : { &width, &tone, &fade, &direct, &balance })
+        Dial* const murkRow[5] = { &width, &eqTilt, &fade, &blend, &balance };
+        Dial* const murmurRow[5] = { &width, &tone, &fade, &direct, &balance };
+        for (auto* d : murk ? murkRow : murmurRow)
         {
             d->setBounds (x, 120, 110, 128);
             x += 112;
         }
-        sync.setBounds (36, 288, 558, 32);
-        spreadSolo.setBounds (36, 356, 325, 32);
-        halfLength.setBounds (377, 356, 217, 32);
-        stepSet.setBounds (36, 424, 558, 32);
-
-        for (int i = 0; i < switches.size(); ++i)
-            switches[i]->setBounds (646 + (i % 2) * 145, 118 + (i / 2) * 44, 133, 34);
+        if (murk)
+        {
+            glueDial.setBounds (36, 268, 110, 128);
+            crossDial.setBounds (148, 268, 110, 128);
+            volume.setBounds (260, 268, 110, 128);
+            crossSource.setBounds (386, 296, 208, 32);
+            eqOn.setBounds (36, 434, 268, 32);
+            spreadSolo.setBounds (320, 434, 274, 32);
+            sync.setBounds (36, 502, 558, 32);
+            stepSet.setBounds (36, 570, 558, 32);
+        }
+        else
+        {
+            sync.setBounds (36, 288, 558, 32);
+            spreadSolo.setBounds (36, 356, 325, 32);
+            halfLength.setBounds (377, 356, 217, 32);
+            stepSet.setBounds (36, 424, 558, 32);
+        }
+        for (auto* list : { &switches, &murkSwitches })
+            for (int i = 0; i < list->size(); ++i)
+                (*list)[i]->setBounds (646 + (i % 2) * 145, 118 + (i / 2) * 44, 133, 34);
         inGain.setBounds (646, 338, 278, 40);
         outGain.setBounds (646, 392, 278, 40);
-        bufferSeconds.setBounds (646, 446, 278, 40);
+        bufferSeconds.setBounds (646, murk ? 392 : 446, 278, 40);
     }
-    else
+    else if (page == MotionPage)
     {
         secA = { 20, 76, 450, 544 };
         secB = { 490, 76, 450, 124 };
@@ -1155,6 +1754,25 @@ void MurmurEditor::resized()
         rootDown.setBounds (727, 572, 44, 28);
         rootUp.setBounds (779, 572, 44, 28);
     }
+    else // Pedal
+    {
+        secA = { 20, 76, 600, 544 };
+        secB = { 630, 76, 310, 544 };
+        tableMode.setBounds (300, 86, 150, 28);
+        showActions.setBounds (462, 86, 142, 28);
+        for (int k = 0; k < 4; ++k)
+            pedalCards[k]->setBounds (36 + k * 145, 122, 133, 226);
+        tryBoth.setBounds (516, 393, 88, 30);
+        tryMode.setBounds (516, 437, 88, 30);
+        tryKeep.setBounds (516, 481, 88, 30);
+        keepLearn.setBounds (836, 560, 88, 28);
+        footDefaults.setBounds (500, 558, 104, 30);
+        expressionPanel.setBounds (646, 92, 278, 262);
+        footDevice.setBounds (766, 404, 158, 28);
+        pedalMap.setBounds (846, 438, 78, 28);
+        keeperContext.setBounds (646, 512, 180, 30);
+        keepExport.setBounds (836, 512, 88, 30);
+    }
 }
 
 void MurmurEditor::timerCallback()
@@ -1164,59 +1782,116 @@ void MurmurEditor::timerCallback()
     lastTick = now;
     auto& s = proc.apvts;
     const auto& eng = proc.getEngine();
+    const int mode = proc.currentMode();
+    const bool murk = mode == 1;
 
-    for (auto* c : { &wetCard, &loopCard, &rateCard, &khzCard, &bpmCard, &noteCard, &octaveCard })
+    if (mode != shownMode)
+    {
+        updateVisibility();
+        resized();
+        repaint();
+    }
+    modeButton.card.setValue (murk ? "MURK" : "MURMUR");
+
+    // KEEP flips to KEPT for a moment after every Keeper, and the note field opens
+    const int kp = proc.uiKeepPulse.load();
+    if (kp != seenKeep)
+    {
+        seenKeep = kp;
+        keptUntil = now + 1.6;
+        noteNumber = proc.lastKeeper();
+        noteEditor.clear();
+        noteEditor.setVisible (true);
+        noteUntil = now + 20.0;
+        repaint (556, 64, 384, 48);
+    }
+    keepButton.card.setValue (now < keptUntil ? "KEPT" : "KEEP");
+    if (noteEditor.isVisible() && now > noteUntil && ! noteEditor.hasKeyboardFocus (true)) { closeNote (false); repaint (556, 64, 384, 48); }
+
+    for (auto* c : { &wetCard, &loopCard, &rateCard, &khzCard, &bpmCard, &noteCard, &octaveCard, &modeButton.card, &keepButton.card })
         c->advance (dt);
 
-    if (page == 0)
+    if (page == PanelPage)
     {
-        static const char* wetNames[] = { "REVERB", "DELAY", "SLIP" };
-        static const char* loopNames[] = { "ENV", "TAPE", "STRETCH" };
-        const int wm = jlimit (0, 2, (int) std::lround (s.getRawParameterValue (ParamIDs::wetMode)->load()));
-        const int lm = jlimit (0, 2, (int) std::lround (s.getRawParameterValue (ParamIDs::loopMode)->load()));
-        wetCard.setValue (wetNames[wm]);
-        loopCard.setValue (loopNames[lm]);
+        const int wm = jlimit (0, 2, (int) std::lround (s.getRawParameterValue (murk ? ParamIDs::murkWet : ParamIDs::wetMode)->load()));
+        const int lm = jlimit (0, 2, (int) std::lround (s.getRawParameterValue (murk ? ParamIDs::murkLoop : ParamIDs::loopMode)->load()));
+        static const char* wetNames[2][3] = { { "REVERB", "DELAY", "SLIP" }, { "SOUP", "RELAY", "FLIP" } };
+        static const char* loopNames[2][3] = { { "ENV", "TAPE", "STRETCH" }, { "BURST", "RADIO", "MASK" } };
+        wetCard.setValue (wetNames[mode][wm]);
+        loopCard.setValue (loopNames[mode][lm]);
 
-        static const char* timeCap[] = { "Time \xc2\xb7 decay", "Time \xc2\xb7 delay", "Time \xc2\xb7 size" };
-        static const char* wetModCap[] = { "Modify \xc2\xb7 smear", "Modify \xc2\xb7 repeats", "Modify \xc2\xb7 speed" };
-        static const char* lenCap[] = { "Length \xc2\xb7 slice", "Length \xc2\xb7 loop", "Length \xc2\xb7 slice" };
-        static const char* loopModCap[] = { "Modify \xc2\xb7 touch", "Modify \xc2\xb7 speed", "Modify \xc2\xb7 stretch" };
+        static const char* timeCap[2][3] = { { "Time \xc2\xb7 decay", "Time \xc2\xb7 delay", "Time \xc2\xb7 size" },
+                                             { "Time \xc2\xb7 decay", "Time \xc2\xb7 delay", "Time \xc2\xb7 lag" } };
+        static const char* wetModCap[2][3] = { { "Modify \xc2\xb7 smear", "Modify \xc2\xb7 repeats", "Modify \xc2\xb7 speed" },
+                                               { "Modify \xc2\xb7 character", "Modify \xc2\xb7 repeats", "Modify \xc2\xb7 chord" } };
+        static const char* lenCap[2][3] = { { "Length \xc2\xb7 slice", "Length \xc2\xb7 loop", "Length \xc2\xb7 slice" },
+                                            { "Length \xc2\xb7 step", "Length \xc2\xb7 speed", "Length \xc2\xb7 character" } };
+        static const char* loopModCap[2][3] = { { "Modify \xc2\xb7 touch", "Modify \xc2\xb7 speed", "Modify \xc2\xb7 stretch" },
+                                                { "Modify \xc2\xb7 chaos", "Modify \xc2\xb7 station", "Modify \xc2\xb7 threshold" } };
         const bool synced = proc.currentBpm() > 0.0f;
-        time.setCaption (synced && wm != 0 ? String::fromUTF8 ("Time · note") : String::fromUTF8 (timeCap[wm]));
-        wetModify.setCaption (String::fromUTF8 (wetModCap[wm]));
-        length.setCaption (synced && lm == 1 ? String::fromUTF8 ("Length · bar") : String::fromUTF8 (lenCap[lm]));
-        loopModify.setCaption (String::fromUTF8 (loopModCap[lm]));
+        time.setCaption (synced && (murk ? wm != 0 : wm != 0) ? String::fromUTF8 ("Time · note") : String::fromUTF8 (timeCap[mode][wm]));
+        wetModify.setCaption (String::fromUTF8 (wetModCap[mode][wm]));
+        // in Radio, Length is each station's own control
+        static const char* stationLen[5] = { "Length \xc2\xb7 speed", "Length \xc2\xb7 speed", "Length \xc2\xb7 voices", "Length \xc2\xb7 moment", "Length \xc2\xb7 rotation" };
+        const float lmod = s.getRawParameterValue (ParamIDs::loopModify)->load();
+        if (murk && lm == 1)
+            length.setCaption (String::fromUTF8 (stationLen[roundToInt (murmur::MurkLoop::stationPos (lmod))]));
+        else
+            length.setCaption (! murk && synced && lm == 1 ? String::fromUTF8 ("Length · bar") : String::fromUTF8 (lenCap[mode][lm]));
+        loopModify.setCaption (String::fromUTF8 (loopModCap[mode][lm]));
 
-        auto mod = [&] (Dial& d, const char* rampId, const char* knobId, const std::atomic<float>& actual)
+        auto modded = [&] (Dial& d, const char* rampId, const std::atomic<float>& actual)
         {
             const bool active = s.getRawParameterValue (rampId)->load() > 0.5f;
-            juce::ignoreUnused (knobId);
             d.setModulated (actual.load(), active);
             if (active) d.repaint();
         };
-        mod (time, ParamIDs::rampTime, ParamIDs::time, eng.uiTime);
-        mod (wetModify, ParamIDs::rampWetMod, ParamIDs::wetModify, eng.uiWetMod);
-        mod (length, ParamIDs::rampLength, ParamIDs::length, eng.uiLength);
-        mod (loopModify, ParamIDs::rampLoopMod, ParamIDs::loopModify, eng.uiLoopMod);
+        modded (time, ParamIDs::rampTime, eng.uiTime);
+        modded (wetModify, ParamIDs::rampWetMod, eng.uiWetMod);
+        modded (length, ParamIDs::rampLength, eng.uiLength);
+        modded (loopModify, ParamIDs::rampLoopMod, eng.uiLoopMod);
 
-        // Slip and Tape show their speed step on a flip card: direction, interval name and semitones.
-        // When ramping or expression moves the knob, the card follows where it really is.
+        // Step values read out on small flip cards. When ramping or expression moves the
+        // knob, the card follows where it really is.
         auto actual = [&] (const char* rampId, const char* knobId, const std::atomic<float>& moved)
         {
             return s.getRawParameterValue (rampId)->load() > 0.5f ? moved.load() : s.getRawParameterValue (knobId)->load();
         };
-        if (wm == 2)
+        const float wmod = actual (ParamIDs::rampWetMod, ParamIDs::wetModify, eng.uiWetMod);
+        const float lmodA = actual (ParamIDs::rampLoopMod, ParamIDs::loopModify, eng.uiLoopMod);
+        const float lenA = actual (ParamIDs::rampLength, ParamIDs::length, eng.uiLength);
+        String wetStep, loopStep, lenStep;
+        if (! murk && wm == 2)
         {
-            const auto st = murmur::WetChannel::slipStep (actual (ParamIDs::rampWetMod, ParamIDs::wetModify, eng.uiWetMod));
-            wetModify.setStepCard (ui::stepText (st.semis, st.reverse));
+            const auto st = murmur::WetChannel::slipStep (wmod);
+            wetStep = ui::stepText (st.semis, st.reverse);
         }
-        else wetModify.setStepCard ({});
-        if (lm == 1)
+        if (murk && wm == 1)
+            wetStep = murmur::MurkWet::relayEndless (wmod) ? String ("ENDLESS")
+                                                          : String (murmur::MurkWet::relayRepeats (wmod)) + (murmur::MurkWet::relayRepeats (wmod) == 1 ? " REPEAT" : " REPEATS");
+        if (murk && wm == 2)
         {
-            const float rate = murmur::LoopChannel::tapeRate (actual (ParamIDs::rampLoopMod, ParamIDs::loopModify, eng.uiLoopMod));
-            loopModify.setStepCard (ui::stepText (roundToInt (12.0f * std::log2 (std::abs (rate))), rate < 0.0f));
+            const auto& ch = murmur::FlipChords::at (murmur::FlipChords::indexFor (wmod));
+            StringArray parts;
+            for (int v = 0; v < ch.n; ++v) parts.add (ui::intervalName (ch.semis[v]));
+            wetStep = parts.joinIntoString (" ");
         }
-        else loopModify.setStepCard ({});
+        if (! murk && lm == 1)
+        {
+            const float rate = murmur::LoopChannel::tapeRate (lmodA);
+            loopStep = ui::stepText (roundToInt (12.0f * std::log2 (std::abs (rate))), rate < 0.0f);
+        }
+        if (murk && lm == 1)
+        {
+            const float sp = murmur::MurkLoop::stationPos (lmodA);
+            const int near = roundToInt (sp);
+            loopStep = std::abs (sp - (float) near) < 0.12f ? String (murmur::MurkLoop::stationName (near)) : String ("BETWEEN");
+        }
+        if (murk && lm == 2)
+            lenStep = murmur::MurkLoop::maskName (roundToInt (murmur::MurkLoop::maskPos (lenA)));
+        wetModify.setStepCard (wetStep);
+        loopModify.setStepCard (loopStep);
+        length.setStepCard (lenStep);
         for (auto* d : { &time, &wetModify, &length, &loopModify })
             d->advance (dt);
 
@@ -1246,13 +1921,13 @@ void MurmurEditor::timerCallback()
         clock.repaint();
         wetSwitch.repaint();
         loopSwitch.repaint();
-        repaint (340, 360, 280, 30);
+        repaint (340, 340, 280, 50);
     }
     // The tempo card always tracks the running tempo, whichever page is open
     const float bpm = proc.currentBpm();
     bpmCard.setValue (bpm > 0.0f ? String (roundToInt (bpm)) : "--");
 
-    if (page == 2)
+    if (page == MotionPage)
     {
         if (eng.isSynthActive())
         {
@@ -1266,6 +1941,20 @@ void MurmurEditor::timerCallback()
             octaveCard.setValue ("-");
         }
         repaint (720, 544, 210, 24);
+    }
+    if (page == PedalPage)
+    {
+        const int t = pedalTable < 0 ? mode : pedalTable;
+        for (auto* c : pedalCards) c->tick (dt, t);
+        expressionPanel.tick (dt);
+        const auto& st = proc.pedals();
+        const String dev = st.footDevice.isEmpty() ? "FIND AUTOMATICALLY" : (st.footDevice == "none" ? "ABLETON ONLY" : st.footDevice.toUpperCase());
+        if (footDevice.getButtonText() != dev) footDevice.setButtonText (dev);
+        const String map = st.pedalMapChannel == 0 ? "OFF" : "CH " + String (st.pedalMapChannel);
+        if (pedalMap.getButtonText() != map) pedalMap.setButtonText (map);
+        keepLearn.setButtonText (proc.learningWhat() == MurmurProcessor::LearnKeeper ? "PRESS IT" : (st.keeperCC >= 0 ? "CC " + String (st.keeperCC) : "LEARN"));
+        repaint (36, 552, 460, 40);
+        repaint (646, 370, 278, 30);
     }
     presets.repaint();
 }
