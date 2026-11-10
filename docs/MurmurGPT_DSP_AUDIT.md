@@ -51,6 +51,16 @@ The bundled v0.3.0 release's `render-test.txt` reported `ALL PASSED`, yet some s
 ### P3: UI access crosses audio-thread-owned state
 `LoopChannel` exposes non-atomic state/data for message-thread consumption, with a comment acknowledging benign races. C++ data races are undefined behaviour even when they appear benign. Address through atomic snapshots or a bounded lock-free UI snapshot, ensuring the audio thread never blocks or allocates.
 
+## Additional improvements after the initial audit (2026-11-10)
+
+- `Source/engine/DspUtil.h`: added a transposed-direct-form-II biquad low-pass, used as two stages with Butterworth Q values (0.5411961, 1.3065630). The normal clock path uses a four-pole input/output filter with a cutoff of the lower of `0.40*coreRate` and `0.43*hostRate`. This has significantly steeper out-of-band rejection **in the filter unit test**, but it is not an end-to-end polyphase band-limited SRC and does not prove the resulting guitar sound matches the reference.
+- `Source/engine/MurmurEngine.h`: normal Murmur and Murk paths interpolate the filtered host input at the fractional time of each core tick, including cases in which the 64 kHz core runs more than once per 44.1/48 kHz host sample. The Murmur Classic path retains its previous simple sampling and one-pole filtering. Both filter families are processed so that switching modes does not start a completely cold filter.
+- `Tests/ClockQualityTest.cpp`: added standalone frequency-response checks for 44.1/48/96 kHz host rates and 2/8/16/64 kHz core rates. This tests the filter implementation and a stopband target, not the whole engine's aliasing or perceptual quality.
+- `CMakeLists.txt`: registered standalone Env and clock quality tests for full CMake builds.
+- `.github/workflows/murmurgpt-windows.yml`: added a separate Windows VST3 and standalone preview build. It gates release publication on project build, DSP tests, plugin integration tests and CPU benchmark, then publishes a **GitHub prerelease** containing `MurmurGPT-Windows.zip`, rather than overwriting the official `builds` branch. Experimental Windows releases keep the original plugin identity: installations may replace the stable plugin. The job must report **success** before claiming a downloadable preview exists.
+
+**Risk:** filter coefficient updates every 17 host samples as the clock moves; they are not continuously interpolated, and the new path's phase response and dry/wet interaction still require A/B listening and detailed sideband/sweep measurement. Treat the new path as a tested candidate, not a finished high-fidelity resampler.
+
 ## Work completed on the branch
 1. Created branch `MurmurGPT` from `main`.
 2. Changed the Env held-slice wrap and within-slice overlap in `Source/engine/LoopChannel.h`. No preset mappings or plugin UI files changed.
