@@ -61,6 +61,14 @@ The bundled v0.3.0 release's `render-test.txt` reported `ALL PASSED`, yet some s
 
 **Risk:** filter coefficient updates every 17 host samples as the clock moves; they are not continuously interpolated, and the new path's phase response and dry/wet interaction still require A/B listening and detailed sideband/sweep measurement. Treat the new path as a tested candidate, not a finished high-fidelity resampler.
 
+## Preview 1 Windows build verification (2026-11-10)
+
+**Release:** `MurmurGPT-preview-1`, built from commit `58db9c3102435af610c66d7bb481872e403901a1`. The Windows VST3 and standalone application compiled successfully. Clock response, Env slice regression, offline render tests, plugin integration tests and CPU benchmark all passed. The prerelease contains `MurmurGPT-Windows.zip`.
+
+**CPU tradeoff:** Relative to the supplied v0.3.0 release reports, the preview's benchmark on Windows runners shows higher one-core CPU usage at 48 kHz (64-sample buffer): Murmur idle 1.60% -> 2.17%, Murmur busy 2.43% -> 4.29%, Murk idle with Glue 2.27% -> 5.52%, Murk worst-case Synth +1 octave 9.20% -> 11.71%. These runs may have used different runner hardware, so exact comparisons are indicative, not controlled. The new implementation deliberately processes both filter families to keep their states warm, which adds cost. **Next optimisation:** benchmark bypass-aware or crossfade-safe filter-path processing, maintaining audible transition quality without running redundant sections all the time.
+
+The workflow did **not** run pluginval in this preview. Passing the included plugin integration tests is not equivalent to pluginval strictness-level-5 certification or actual DAW listening.
+
 ## Work completed on the branch
 1. Created branch `MurmurGPT` from `main`.
 2. Changed the Env held-slice wrap and within-slice overlap in `Source/engine/LoopChannel.h`. No preset mappings or plugin UI files changed.
