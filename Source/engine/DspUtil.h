@@ -49,6 +49,38 @@ struct OnePole
     void reset() { z = 0.0f; }
 };
 
+// Second-order low-pass in transposed direct form II. Two sections with
+// Q = 0.5411961 / 1.306563 form a maximally-flat fourth-order Butterworth.
+struct LowpassBiquad
+{
+    float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f;
+    float a1 = 0.0f, a2 = 0.0f;
+    float z1 = 0.0f, z2 = 0.0f;
+
+    void setCutoff (float fc, float fs, float q)
+    {
+        const float omega = kTwoPi * clampf (fc, 10.0f, fs * 0.45f) / fs;
+        const float cs = std::cos (omega);
+        const float alpha = std::sin (omega) / (2.0f * q);
+        const float invA0 = 1.0f / (1.0f + alpha);
+        b0 = (1.0f - cs) * 0.5f * invA0;
+        b1 = (1.0f - cs) * invA0;
+        b2 = b0;
+        a1 = -2.0f * cs * invA0;
+        a2 = (1.0f - alpha) * invA0;
+    }
+
+    float process (float x)
+    {
+        const float y = b0 * x + z1;
+        z1 = b1 * x - a1 * y + z2;
+        z2 = b2 * x - a2 * y;
+        return y;
+    }
+
+    void reset() { z1 = z2 = 0.0f; }
+};
+
 struct Rng
 {
     uint32_t s = 0x9E3779B9u;
