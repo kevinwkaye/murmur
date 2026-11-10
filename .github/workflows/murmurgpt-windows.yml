@@ -1,0 +1,121 @@
+name: MurmurGPT Windows preview
+
+on:
+  push:
+    branches: [MurmurGPT]
+    paths:
+      - 'Source/**'
+      - 'Tests/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/murmurgpt-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: murmur-gpt-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure JUCE project
+        run: cmake -S . -B build -DMURMUR_BUILD_TESTS=ON
+
+      - name: Build Windows VST3 and standalone application
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Run clock quality test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports | Out-Null
+          & .\build\Release\murmur_clock_quality_test.exe | Tee-Object -FilePath reports\clock-quality.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Run Env slice test
+        shell: pwsh
+        run: |
+          & .\build\Release\murmur_env_slice_test.exe | Tee-Object -FilePath reports\env-slice.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Run complete DSP render tests
+        shell: pwsh
+        run: |
+          & .\build\Release\murmur_render_test.exe | Tee-Object -FilePath reports\render-test.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Run plugin integration tests
+        shell: pwsh
+        run: |
+          & .\build\Release\murmur_plugin_test.exe | Tee-Object -FilePath reports\plugin-test.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Benchmark CPU
+        shell: pwsh
+        run: |
+          & .\build\Release\murmur_bench.exe | Tee-Object -FilePath reports\cpu-windows.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Package independently installable preview
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item -Recurse build\Murmur_artefacts\Release\VST3\Murmur.vst3 dist\
+          Copy-Item build\Murmur_artefacts\Release\Standalone\Murmur.exe dist\MurmurGPT-standalone.exe
+          Copy-Item -Recurse reports dist\
+          @'
+          MurmurGPT Windows experimental preview
+          ======================================
+
+          One VST3 contains both Murmur and Murk. This build comes from the
+          experimental MurmurGPT branch, not the production main branch.
+
+          INSTALL:
+          1. Unzip this archive.
+          2. Close your DAW.
+          3. Back up your currently installed Murmur.vst3.
+          4. Copy the Murmur.vst3 folder into:
+             C:\Program Files\Common Files\VST3\
+          5. Reopen your DAW and rescan plugins.
+          6. Use MurmurGPT-standalone.exe if you prefer a standalone test.
+
+          IMPORTANT: The internal VST3 identity is unchanged to preserve
+          DAW compatibility. The preview may replace the existing Murmur
+          install, rather than appear as a second separate plugin. Keep
+          your original VST3 backed up and save a copy of important projects.
+
+          Changes: improved clock filtering and fractional input timing
+          for non-Classic modes; Env micro-loop seam fix. These are
+          experimental DSP improvements. A/B listening against the hardware
+          is still required, and fidelity is NOT certified.
+
+          Source and handover:
+          https://github.com/kevinwkaye/murmur/tree/MurmurGPT
+          '@ | Set-Content -Path dist\README-MurmurGPT.txt -Encoding UTF8
+          Compress-Archive -Path dist\* -DestinationPath MurmurGPT-Windows.zip -Force
+
+      - name: Publish experimental GitHub prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "MurmurGPT-preview-$env:GITHUB_RUN_NUMBER"
+          @"
+          Built from branch **MurmurGPT**, commit `$env:GITHUB_SHA`.
+
+          Includes Murmur and Murk in one VST3 and a Windows standalone app.
+          This is an experimental pre-release, not a replacement for the official v0.3.0.
+
+          Validation: the dedicated DSP regression, clock-response, offline-render,
+          plugin integration and CPU benchmark steps must pass before publishing.
+          Hardware sound matching is not yet verified.
+
+          Back up your existing `Murmur.vst3` first. This preview retains the
+          official plugin identity, so Windows/DAWs may replace the original install.
+          "@ | Set-Content release-notes.md
+          gh release create "$tag" .\MurmurGPT-Windows.zip --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" --title "MurmurGPT Windows preview $env:GITHUB_RUN_NUMBER" --notes-file release-notes.md --prerelease
