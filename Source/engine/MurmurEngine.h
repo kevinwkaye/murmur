@@ -99,9 +99,11 @@ public:
         loop.reset();
         glue.reset(); cross.reset(); tiltWet.reset(); tiltLoop.reset();
         phase = 0.0f;
-        prevOut = curOut = lastWet = {};
+        prevOut = curOut = lastWet = prevHostIn = {};
         for (auto& f : inLp) f.reset();
         for (auto& f : outLp) f.reset();
+        for (auto& channel : inQualityLp) for (auto& f : channel) f.reset();
+        for (auto& channel : outQualityLp) for (auto& f : channel) f.reset();
         logRatio = -1000.0f; // forces a snap on the first block
         wetGain = 0.0f;
         filterCounter = 0;
@@ -243,6 +245,17 @@ private:
                 const float fc = std::min (0.45f * rate, 0.45f * fs);
                 for (auto& f : inLp) f.setCutoff (fc, fs);
                 for (auto& f : outLp) f.setCutoff (fc, fs);
+
+                // Polished mode: four-pole anti-alias / reconstruction filters.
+                // Leave the deliberately coloured Classic path unchanged.
+                const float qualityCutoff = std::min (0.40f * rate, 0.43f * fs);
+                static constexpr float butterQ[2] = { 0.5411961f, 1.3065630f };
+                for (int c = 0; c < 2; ++c)
+                    for (int stage = 0; stage < 2; ++stage)
+                    {
+                        inQualityLp[c][stage].setCutoff (qualityCutoff, fs, butterQ[stage]);
+                        outQualityLp[c][stage].setCutoff (qualityCutoff, fs, butterQ[stage]);
+                    }
             }
 
             float inL = left[i] * inGain;
@@ -250,19 +263,43 @@ private:
             if (p.miso) inR = inL;
             inPeak = std::max (inPeak * 0.99995f, std::max (std::fabs (inL), std::fabs (inR)));
 
-            const float aL = inLp[0].process (inL);
-            const float aR = inLp[1].process (inR);
+            // Run both filters to keep their state warm during mode switches.
+            const Stereo vintageIn { inLp[0].process (inL), inLp[1].process (inR) };
+            const Stereo qualityIn {
+                inQualityLp[0][1].process (inQualityLp[0][0].process (inL)),
+                inQualityLp[1][1].process (inQualityLp[1][0].process (inR))
+            };
+            const bool classicClock = p.classic && p.mode == 0;
+            const Stereo hostIn = classicClock ? vintageIn : qualityIn;
 
-            phase += rate / fs;
+            // At a 64 kHz core clock the 44.1/48 kHz host supplies fewer samples
+            // than core ticks. Interpolate each tick at its fractional position
+            // in the current host-sample interval rather than reusing one sample.
+            const float oldPhase = phase;
+            const float advance = rate / fs;
+            phase += advance;
+            int tick = 0;
             while (phase >= 1.0f)
             {
                 phase -= 1.0f;
+                const float fraction = clampf ((1.0f - oldPhase + (float) tick) / advance, 0.0f, 1.0f);
+                const Stereo interpolated = prevHostIn * (1.0f - fraction) + hostIn * fraction;
                 prevOut = curOut;
-                curOut = coreTick ({ aL, aR });
+                curOut = coreTick (classicClock ? hostIn : interpolated);
+                ++tick;
             }
+            prevHostIn = hostIn;
 
-            float oL = outLp[0].process (prevOut.l + (curOut.l - prevOut.l) * phase);
-            float oR = outLp[1].process (prevOut.r + (curOut.r - prevOut.r) * phase);
+            const float reconstructedL = prevOut.l + (curOut.l - prevOut.l) * phase;
+            const float reconstructedR = prevOut.r + (curOut.r - prevOut.r) * phase;
+            // Keep Classic's first-order colour while reducing imaging/aliasing
+            // on the normal high-fidelity processing path.
+            const float legacyL = outLp[0].process (reconstructedL);
+            const float legacyR = outLp[1].process (reconstructedR);
+            const float qualityL = outQualityLp[0][1].process (outQualityLp[0][0].process (reconstructedL));
+            const float qualityR = outQualityLp[1][1].process (outQualityLp[1][0].process (reconstructedR));
+            float oL = classicClock ? legacyL : qualityL;
+            float oR = classicClock ? legacyR : qualityR;
 
             // Synth Mode gates MOOD's output with the note
             const float g = synth.gain (p.synthGate, p.attack, p.decay, p.sustain, p.release, dt);
@@ -417,8 +454,9 @@ private:
     float logRatio = 0.0f;
     float wetGain = 0.0f;
     int filterCounter = 0;
-    Stereo prevOut, curOut, lastWet;
+    Stereo prevOut, curOut, lastWet, prevHostIn;
     OnePole inLp[2], outLp[2];
+    LowpassBiquad inQualityLp[2][2], outQualityLp[2][2];
     WetChannel wet;
     MurkWet murkWet;
     LoopChannel loop;
