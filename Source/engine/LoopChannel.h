@@ -340,19 +340,26 @@ private:
                     if (! held) { intra = envPos - sliceStart; holdAge = 0.0f; }
                     holdAge += 1.0f;
                     intra += 1.0f;
-                    if (intra >= SS) intra -= SS;
+                    // The last 'fl' samples overlap the beginning of this SAME slice.
+                    // After the blend, continue at the end of the overlap instead of
+                    // jumping back to sample zero (which would create another seam).
+                    const float fl = std::min (64.0f, SS * 0.25f);
+                    if (intra >= SS) intra = fl + (intra - SS);
                     readPos = sliceStart + intra;
                 }
                 held = hold;
                 v = readAt (readPos);
                 if (hold)
                 {
-                    // crossfade into the slice start so the repeat is seamless
                     const float fl = std::min (64.0f, SS * 0.25f);
                     if (intra > SS - fl)
                     {
-                        const float k = (intra - (SS - fl)) / fl * std::min (1.0f, holdAge / fl);
-                        v = v * (1.0f - k) + readAt (readPos - SS) * k;
+                        // Overlap the tail with the head of the current held slice,
+                        // not an equivalent position in the preceding slice.
+                        // The two read heads are 'SS - fl' samples apart.
+                        const float k = clampf ((intra - (SS - fl)) / fl, 0.0f, 1.0f)
+                                      * std::min (1.0f, holdAge / fl);
+                        v = v * (1.0f - k) + readAt (sliceStart + intra - (SS - fl)) * k;
                     }
                 }
 
