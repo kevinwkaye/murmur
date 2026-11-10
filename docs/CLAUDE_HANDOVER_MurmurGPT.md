@@ -16,6 +16,15 @@
 - `docs/MurmurGPT_DSP_AUDIT.md`: source-based audit and roadmap.
 - This handover document.
 
+## Further work completed after the initial Env fix
+
+- `Source/engine/DspUtil.h`: a reusable low-pass biquad was added.
+- `Source/engine/MurmurEngine.h`: polished-mode clock filtering was upgraded from one-pole to cascaded Butterworth sections, with fractional-time host input interpolation at core ticks. Classic Murmur mode preserves the original one-pole path and input sampling behaviour.
+- `Tests/ClockQualityTest.cpp`: filter frequency-response checks added for multiple host and core clock rates. This is *not* an end-to-end listening or alias test.
+- `CMakeLists.txt`: both standalone regression tests are included in regular CMake builds.
+- `.github/workflows/murmurgpt-windows.yml`: separate Windows VST3/standalone preview workflow. On successful Windows test and build steps it uploads a ZIP to a **GitHub prerelease**. It does not force-push the existing official `builds` branches. Do not interpret a workflow started or in progress as a successful Windows installer.
+- Read the latest GitHub release and workflow run **at the time you resume**. Confirm which commit built the preview and whether its checks passed.
+
 ## Critical instructions for resuming work
 1. Review **both branches**, starting with `git fetch origin && git switch MurmurGPT && git pull --ff-only origin MurmurGPT`. If the user wants a later main change integrated, use a cautious merge/rebase with backups, not an overwrite.
 2. Read `docs/MurmurGPT_DSP_AUDIT.md` and inspect `git diff origin/main...MurmurGPT` plus the GitHub Actions run for `MurmurGPT validation`. Do not assume tests have passed until verified.
