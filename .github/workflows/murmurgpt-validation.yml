@@ -1,0 +1,23 @@
+name: MurmurGPT validation
+
+on:
+  push:
+    branches: [MurmurGPT]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dsp-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile standalone DSP regression test
+        run: c++ -std=c++17 -O2 -Wall -Wextra -ISource/engine Tests/EnvSliceTest.cpp -o env_slice_test
+      - name: Run standalone DSP regression test
+        run: ./env_slice_test
+      - name: Compile existing offline render test
+        run: c++ -std=c++17 -O2 -ISource/engine Tests/RenderTest.cpp -o murmur_render_test
+      - name: Run existing offline render test
+        run: ./murmur_render_test
