@@ -247,6 +247,63 @@ public:
     }
 private:
 
+    // Stretch grains overlap by half. If a new grain simply starts at the moving centre, its
+    // waveform is out of phase with the grain it fades into and the two cancel (a steady tone
+    // measured 22 dB of flutter). Search near the nominal start for the offset whose audio best
+    // matches what the outgoing grain is about to play, by normalised correlation: coarse
+    // steps first, then a fine search round the best.
+    float alignedGrainStart (float nominal, const Grain& outgoing, float dir, float G, float Lf) const
+    {
+        if (! outgoing.active) return nominal;
+        const int win = (int) std::min (G * 0.5f, 512.0f);
+        const int range = (int) std::min (G * 0.25f, 480.0f);
+        if (win < 16 || range < 2) return nominal;
+        const int stride = win >= 128 ? 2 : 1;
+        const float base = outgoing.startPos + outgoing.dir * outgoing.age;
+        auto mono = [this, Lf] (float pos)
+        {
+            const int i = (int) wrapPos (std::floor (pos), Lf);
+            const size_t k = (size_t) phys (i);
+            return buf[0][k] + buf[1][k];
+        };
+        // the outgoing grain's next stretch, and its energy
+        float ref[512];
+        float refE = 1e-9f;
+        int nRef = 0;
+        for (int k = 0; k < win; k += stride, ++nRef)
+        {
+            ref[nRef] = mono (base + outgoing.dir * (float) k);
+            refE += ref[nRef] * ref[nRef];
+        }
+        auto score = [&] (float cand)
+        {
+            float xy = 0.0f, yy = 1e-9f;
+            int n = 0;
+            for (int k = 0; k < win; k += stride, ++n)
+            {
+                const float y = mono (cand + dir * (float) k);
+                xy += ref[n] * y;
+                yy += y * y;
+            }
+            return xy / std::sqrt (refE * yy);
+        };
+        const int coarse = std::max (1, range / 24);
+        float best = nominal, bestScore = -2.0f;
+        for (int off = -range; off <= range; off += coarse)
+        {
+            const float sc = score (nominal + (float) off);
+            if (sc > bestScore) { bestScore = sc; best = nominal + (float) off; }
+        }
+        const float centre = best;
+        for (int off = -coarse + 1; off < coarse; ++off)
+        {
+            if (off == 0) continue;
+            const float sc = score (centre + (float) off);
+            if (sc > bestScore) { bestScore = sc; best = centre + (float) off; }
+        }
+        return wrapPos (best, Lf);
+    }
+
     // Where the player is right now, in loop samples (used to place the record head)
     float currentPos (int mode) const
     {
@@ -432,7 +489,10 @@ private:
                     {
                         grainTimer -= interval;
                         auto& gr = grains[nextGrain];
-                        gr.startPos = stretchC + (p.classic ? rng.next() * G * 0.5f : 0.0f);
+                        if (p.classic) // the original's wispy, scattered grains
+                            gr.startPos = stretchC + rng.next() * G * 0.5f;
+                        else           // start where the waveform lines up with the grain fading out
+                            gr.startPos = alignedGrainStart (stretchC, grains[(nextGrain + 1) % nGr], dir, G, Lf);
                         gr.age = 0; gr.len = G; gr.dir = dir; gr.active = true;
                         nextGrain = (nextGrain + 1) % nGr;
                     }
