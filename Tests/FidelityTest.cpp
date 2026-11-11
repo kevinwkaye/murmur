@@ -2,9 +2,13 @@
 // Each check runs the whole engine, host rate in and out, so the Clock's resampling is included.
 //
 //  1. Stretch keeps a steady tone steady (it measured 22 dB of grain flutter before).
-//  2. Reverb tails darken as they decay: treble dies faster than bass, as in the MOOD MKII demo
-//     (low 7.5 s, mid 3.3 s, high 2.2 s), and the sides stay partly correlated (demo 0.55 to 0.9).
+//  2. Reverb tails are dark from the start and decay evenly, with wide sides. Pass 2 (11 November)
+//     measured clean tails in both demos: 3 to 7 kHz 31 to 47 dB under the low mids, even decay
+//     across bands, 0.1 to 0.3 left/right correlation. (Pass 1's targets, treble decaying faster
+//     and 0.55 to 0.9 correlation, came from segments that still held the mono dry guitar.)
 //  3. Low Clock settings keep their aliasing grit but add no mirror images above the clock's band.
+//  4. Murk's Soup re-synthesises held notes in tune and pure (the Bad Mood demo's Soup is tonal;
+//     preview 2's was 254 cents out and noise-like).
 //
 // Usage: murmur_fidelity_test
 #include "MurmurEngine.h"
@@ -150,7 +154,7 @@ int main()
         expect (levelRange (r.l, 330.0f, 5.0f) < 3.0, what, levelRange (r.l, 330.0f, 5.0f));
     }
 
-    // ---- 2. Reverb tails darken and stay partly correlated ----
+    // ---- 2. Reverb tails: dark from the start, even decay, wide ----
     std::printf ("Reverb\n");
     auto click = [] (int i) { return i >= 4800 && i < 4824 ? 0.5f * std::sin (3.14159f * (float) (i - 4800) / 24.0f) : 0.0f; };
     for (float time : { 0.4f, 0.7f })
@@ -161,11 +165,22 @@ int main()
         });
         const auto d = decayTimes (r.l, 0.12f);
         char what[96];
-        std::snprintf (what, sizeof what, "Reverb Time %.1f: treble decays faster than bass (high/low)", time);
-        expect (d.high / d.low < 0.8, what, d.high / d.low);
-        std::snprintf (what, sizeof what, "Reverb Time %.1f: left/right correlation between 0.4 and 0.85", time);
+        // a click is flat, so the early tail's own balance is the reverb's voicing
+        auto bandDb = [&] (double centre)
+        {
+            const auto y = bandPass (r.l, centre, 1.0);
+            double e = 0.0;
+            for (int i = (int) (0.3f * kFs); i < (int) (1.3f * kFs); ++i) e += y[(size_t) i] * y[(size_t) i];
+            return 10.0 * std::log10 (e + 1e-30);
+        };
+        const double dark = bandDb (4000.0) - bandDb (500.0);
+        std::snprintf (what, sizeof what, "Reverb Time %.1f: 4 kHz sits 15 to 40 dB under 500 Hz early on", time);
+        expect (dark < -15.0 && dark > -40.0, what, dark);
+        std::snprintf (what, sizeof what, "Reverb Time %.1f: treble and bass decay evenly (high/low)", time);
+        expect (d.high / d.low > 0.5 && d.high / d.low < 1.3, what, d.high / d.low);
+        std::snprintf (what, sizeof what, "Reverb Time %.1f: left/right correlation between 0.1 and 0.45", time);
         const double c = correlation (r, 0.3f, 3.0f);
-        expect (c > 0.4 && c < 0.85, what, c);
+        expect (c > 0.1 && c < 0.45, what, c);
     }
 
     // ---- 3. Low Clock: grit, but no mirror images ----
@@ -181,6 +196,70 @@ int main()
     const auto above = run (3.0f, tone (3000.0f, 0.3f), lowClock);
     const double alias = levelAt (above.l, 1000.0f, 1.0f, 1.5f);
     expect (alias > -30.0, "4 kHz clock: a 3 kHz tone still aliases to 1 kHz (grit kept)", alias);
+
+    // ---- 4. Soup holds a note in tune, pure and steady ----
+    std::printf ("Soup\n");
+    for (float modify : { 0.2f, 0.5f })
+    {
+        // the note fades in and out over 50 ms, so no splash from a hard edge lands in the tail
+        const auto r = run (7.0f, [] (int i)
+        {
+            const float t = (float) i / kFs, env = std::min ({ 1.0f, t / 0.05f, std::max (0.0f, (3.0f - t) / 0.05f) });
+            return 0.3f * env * std::sin (6.2831853f * 220.0f * t);
+        },
+                            [modify] (float, EngineParams& p)
+        {
+            p.mode = 1; p.wetOn = true; p.murkWet = 0; p.time = 0.8f; p.wetModify = modify; p.mix = 1.0f; p.dryKill = true;
+        });
+        // the note's band (+/-3% of 220 Hz) from DFT bins one resolution step apart: its power
+        // (summed, over the Hann window's 1.5-bin noise bandwidth) and its centroid in cents.
+        // Soup drifts on purpose, so a single narrow bin would undercount a slightly broad line.
+        const double res = 1.0 / 2.4;
+        double bandP = 0.0, moment = 0.0;
+        for (double hz = 220.0 * 0.97; hz <= 220.0 * 1.03; hz += res)
+        {
+            const double pw = 0.5 * std::pow (10.0, levelAt (r.l, (float) hz, 3.3f, 2.4f) / 10.0);
+            bandP += pw;
+            moment += pw * hz;
+        }
+        const double cents = 1200.0 * std::log2 (moment / bandP / 220.0);
+        bandP /= 1.5;
+        // total power, Hann-weighted like the band measurement so the decay counts the same in both
+        double total = 0.0, wsum = 0.0;
+        const int n0 = (int) (3.3f * kFs), nw = (int) (2.4f * kFs);
+        for (int i = 0; i < nw; ++i)
+        {
+            const double w = 0.5 - 0.5 * std::cos (2.0 * 3.14159265 * i / nw);
+            total += w * w * (double) r.l[(size_t) (n0 + i)] * r.l[(size_t) (n0 + i)];
+            wsum += w * w;
+        }
+        total /= wsum;
+        const double purity = 10.0 * std::log10 (bandP / std::max (1e-20, total - bandP));
+        char what[96];
+        std::snprintf (what, sizeof what, "Soup Modify %.1f: a held 220 Hz note stays within 5 cents", modify);
+        expect (std::fabs (cents) < 5.0, what, cents);
+        if (modify < 0.3f)
+        {
+            std::snprintf (what, sizeof what, "Soup Modify %.1f: and at least 15 dB pure", modify);
+            expect (purity > 15.0, what, purity);
+        }
+        // each side's level follows a smooth decay (whole-cycle windows, residual from a line)
+        std::vector<double> lv;
+        const int w = (int) (kFs / 220.0f * 20.0f);
+        for (int i = (int) (3.3f * kFs); i + w < (int) (5.7f * kFs); i += w)
+        {
+            double e = 0.0;
+            for (int k = 0; k < w; ++k) e += (double) r.l[(size_t) (i + k)] * r.l[(size_t) (i + k)];
+            lv.push_back (10.0 * std::log10 (e / w + 1e-20));
+        }
+        double sx = 0, sy = 0, sxx = 0, sxy = 0;
+        for (size_t i = 0; i < lv.size(); ++i) { sx += (double) i; sy += lv[i]; sxx += (double) i * i; sxy += (double) i * lv[i]; }
+        const double n = (double) lv.size(), slope = (n * sxy - sx * sy) / (n * sxx - sx * sx), icpt = (sy - slope * sx) / n;
+        double wob = 0.0;
+        for (size_t i = 0; i < lv.size(); ++i) wob = std::max (wob, std::fabs (lv[i] - (icpt + slope * (double) i)));
+        std::snprintf (what, sizeof what, "Soup Modify %.1f: each side decays smoothly, within 1.5 dB", modify);
+        expect (wob < 1.5, what, wob);
+    }
 
     std::printf ("\n%s (%d failures)\n", failures == 0 ? "ALL PASSED" : "FAILED", failures);
     return failures == 0 ? 0 : 1;
