@@ -61,6 +61,8 @@ public:
         for (auto& z : fdnLp) z = 0.0f;
         tapDamp[0] = tapDamp[1] = 0.0f;
         lastTap = {};
+        revVoice.reset();
+        dlyVoice.reset();
         dA = dB = dCur = 4096.0f; xfade = 0;
         slipCur = {}; slipPrev = {}; slipCounter = 0.0f; slipPan = 0.0f;
         frozen = false; freezeGain = 0.0f; freezePos = 0.0f; freezeLen = 1024;
@@ -260,13 +262,23 @@ private:
             lerpf (tr * 1.1f, dr * 0.8f + tailR * 1.6f, m)
         };
 
-        if (! p.classic && ! p.spread)
+        if (! p.classic)
         {
-            // The pedal's tails measured 0.55 to 0.9 left/right correlation; fully independent
-            // sides (0.0) sound hollow and phasey. Blending some of each side into the other
-            // brings it to about 0.6. Spread keeps the full width.
-            constexpr float k = 0.33f, norm = 0.9496f; // 1 / sqrt (1 + k^2)
-            out = { (out.l + k * out.r) * norm, (out.r + k * out.l) * norm };
+            // Voicing, measured from both demos (November 11 pass 2). Clean tails after a note
+            // ends put 1.2 to 3 kHz 14 to 38 dB under the low mids and 3 to 7 kHz 31 to 47 dB
+            // under, against 5 to 9 and 4 to 15 dB in the notes going in: the reverb is dark
+            // from the first moment, like a 12 dB per octave low-pass near 1.2 kHz, and then
+            // decays about evenly across bands. The cutoff is set in hertz, not as a share of
+            // the clock, so low Clock settings darken only through their own band limit.
+            out = revVoice.process (out, kReverbVoiceHz, p.coreRate);
+
+            // Clean MOOD tails measured 0.1 to 0.3 left/right correlation (wide, not phasey).
+            // A little crossfeed takes the network's independent sides from about 0 to 0.2.
+            if (! p.spread)
+            {
+                constexpr float k = 0.12f, norm = 0.99285f; // 1 / sqrt (1 + k^2)
+                out = { (out.l + k * out.r) * norm, (out.r + k * out.l) * norm };
+            }
         }
 
         if (p.classic) // resonant, ringy trails
@@ -337,7 +349,9 @@ private:
             dly[0].push (softClip (in.l + fb * o.l));
             dly[1].push (softClip (in.r + fb * o.r));
         }
-        return o;
+        // The MOOD demo's echoes came back softer on top than the notes they repeated
+        // (about 7 to 12 dB above 2 kHz): clean, but not glassy. Classic keeps its old top.
+        return p.classic ? o : dlyVoice.process (o, kDelayVoiceHz, p.coreRate);
     }
 
     // ---- Slip --------------------------------------------------------------------------
@@ -502,7 +516,30 @@ private:
     std::array<DelayLine, 4> fdn;
     float fdnLp[4] {};
     float lfo[4] {};
-    static constexpr float kHighDecay = 0.25f; // treble decay time as a share of the bass's
+    // Treble decay time as a share of the bass's. Pass 1 set 0.25 from automatically found
+    // tails; the clean tails in pass 2 decay about evenly once the voicing has darkened them,
+    // so only a gentle extra loss remains.
+    static constexpr float kHighDecay = 0.7f;
+    static constexpr float kReverbVoiceHz = 1200.0f, kDelayVoiceHz = 3000.0f;
+
+    // A two-pole Butterworth low-pass whose cutoff is fixed in hertz at the core rate,
+    // capped at 0.4 of the clock. Coefficients follow the clock only when it moves.
+    struct Voice
+    {
+        LowpassBiquad f[2];
+        float rate = 0.0f;
+        Stereo process (Stereo x, float hz, float coreRate)
+        {
+            if (std::fabs (coreRate - rate) > rate * 0.002f)
+            {
+                rate = coreRate;
+                for (auto& b : f) b.setCutoff (std::min (hz, 0.4f * coreRate), coreRate, 0.7071068f);
+            }
+            return { f[0].process (x.l), f[1].process (x.r) };
+        }
+        void reset() { f[0].reset(); f[1].reset(); rate = 0.0f; }
+    };
+    Voice revVoice, dlyVoice;
     float dampFor = -1.0f, dampA = 0.22f;
     float tapDamp[2] {};
     static constexpr float kTapDamp = 0.33f; // one pole at about 4.2 kHz at the 64 kHz clock
