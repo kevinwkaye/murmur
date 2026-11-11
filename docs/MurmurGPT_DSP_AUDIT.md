@@ -102,3 +102,12 @@ Full write-up: `docs/Claude_Fidelity_Pass_2026-11-11.md`. In short:
 
 ## Handover notes for Claude
 See `docs/CLAUDE_HANDOVER_MurmurGPT.md`. It is authoritative for changes completed on this branch and should be read together with `git diff main...MurmurGPT`, source code and actual CI logs.
+
+## Claude pass 2 (11 November 2026)
+
+See `docs/Claude_Fidelity_Pass2_2026-11-11.md`. In summary:
+- Reverb: dark from the start (two-pole 1.2 kHz), even decay across bands, correlation about 0.2. Measured against both demos' clean tails.
+- Delay: two-pole 3 kHz on the output.
+- Soup: phase-locked phase vocoder (in tune, 19 to 20 dB pure, wide), four-pole 2.6 kHz.
+- Stretch alignment search about 3 times cheaper (worst case 6.8 to 8.9% from 14 to 16%).
+- Fidelity test targets updated.

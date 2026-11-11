@@ -41,6 +41,10 @@ Claude measured the pedal demos Kevin supplied against the plugin, then made thr
 9. GitHub's existing `.github/workflows/build.yml` force-pushes `builds` and `builds-linux-arm64` branches to publish releases. Prefer the dedicated MurmurGPT test workflow until expressly asked to make an experimental build.
 10. Log each change with goal, implementation, evidence, CPU/latency impact, listening observations, CI result and next action.
 
+## Claude pass 2 (11 November 2026)
+
+Read `docs/Claude_Fidelity_Pass2_2026-11-11.md`. It overturns two of pass 1's reverb targets (clean MOOD tails are dark from the start, decay evenly and correlate only 0.1 to 0.3), voices the reverb and delay, rebuilds Soup as a phase-locked vocoder, and brings the Stretch search's CPU back down. Preview 3 is built from it.
+
 ## Pasteable opening request for Claude Desktop / Cowork
 
 Please resume development of my Murmur/Murk JUCE plugin from GitHub repository `kevinwkaye/murmur`, **branch `MurmurGPT`**, not `main`. Read `docs/CLAUDE_HANDOVER_MurmurGPT.md` and `docs/MurmurGPT_DSP_AUDIT.md` first. Review `git diff main...MurmurGPT` and the dedicated CI status before proposing modifications. ChatGPT discovered the current source and made a narrow Env micro-loop overlap fix plus tests and audit documentation. Preserve those changes, confirm they compile and actually improve the sound, and continue the DSP quality plan in small, reversible, tested commits. Prioritise objective rate-conversion tests and crossfade validation before major DSP changes. Preserve Murmur and Murk as separate characters inside one VST3; never change or merge `main` without my approval. Explain progress in plain English, particularly what could audibly improve and how it was verified.
