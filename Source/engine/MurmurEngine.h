@@ -246,9 +246,10 @@ private:
                 for (auto& f : inLp) f.setCutoff (fc, fs);
                 for (auto& f : outLp) f.setCutoff (fc, fs);
 
-                // Polished mode: four-pole anti-alias / reconstruction filters.
-                // Leave the deliberately coloured Classic path unchanged.
-                const float qualityCutoff = std::min (0.40f * rate, 0.43f * fs);
+                // Four-pole reconstruction filter on the way out, so lowering the Clock never
+                // adds fizzy mirror images above the clock's band. Leave the deliberately
+                // coloured Classic path unchanged.
+                const float qualityCutoff = std::min (0.45f * rate, 0.43f * fs);
                 static constexpr float butterQ[2] = { 0.5411961f, 1.3065630f };
                 for (int c = 0; c < 2; ++c)
                     for (int stage = 0; stage < 2; ++stage)
@@ -270,7 +271,13 @@ private:
                 inQualityLp[1][1].process (inQualityLp[1][0].process (inR))
             };
             const bool classicClock = p.classic && p.mode == 0;
-            const Stereo hostIn = classicClock ? vintageIn : qualityIn;
+            // On the way in, the gentle one-pole filter lets some aliasing through at low
+            // Clock settings. That grit is part of the pedals' sound: the original MOOD's
+            // makers say noise and aliasing become noticeable at about 8 kHz and lower, and
+            // the MKII's low clock is described as "grittily lo-fi". The steeper filter
+            // (kept for comparison) turned the low clocks muffled instead of gritty.
+            constexpr bool kGrittyInput = true;
+            const Stereo hostIn = (classicClock || kGrittyInput) ? vintageIn : qualityIn;
 
             // At a 64 kHz core clock the 44.1/48 kHz host supplies fewer samples
             // than core ticks. Interpolate each tick at its fractional position
