@@ -137,6 +137,15 @@ public:
         accR.assign ((size_t) kN / 2 + 1, 0.0f);
         phL.assign ((size_t) kN / 2 + 1, 0.0f);
         phR.assign ((size_t) kN / 2 + 1, 0.0f);
+        advL.assign ((size_t) kN / 2 + 1, 0.0f);
+        advR.assign ((size_t) kN / 2 + 1, 0.0f);
+        lastAnaL.assign ((size_t) kN / 2 + 1, 0.0f);
+        lastAnaR.assign ((size_t) kN / 2 + 1, 0.0f);
+        relL.assign ((size_t) kN / 2 + 1, 0.0f);
+        relR.assign ((size_t) kN / 2 + 1, 0.0f);
+        fedL.assign ((size_t) kN / 2 + 1, 0);
+        fedR.assign ((size_t) kN / 2 + 1, 0);
+        peaks.assign ((size_t) kN / 2 + 1, 0);
         window.resize ((size_t) kN);
         for (int i = 0; i < kN; ++i) window[(size_t) i] = 0.5f - 0.5f * std::cos (kTwoPi * (float) i / (float) kN);
         reset();
@@ -154,6 +163,15 @@ public:
         std::fill (olaR.begin(), olaR.end(), 0.0f);
         std::fill (accL.begin(), accL.end(), 0.0f);
         std::fill (accR.begin(), accR.end(), 0.0f);
+        std::fill (advL.begin(), advL.end(), 0.0f);
+        std::fill (advR.begin(), advR.end(), 0.0f);
+        std::fill (lastAnaL.begin(), lastAnaL.end(), 0.0f);
+        std::fill (lastAnaR.begin(), lastAnaR.end(), 0.0f);
+        std::fill (relL.begin(), relL.end(), 0.0f);
+        std::fill (relR.begin(), relR.end(), 0.0f);
+        for (size_t k = 0; k < phL.size(); ++k) { phL[k] = rng.next() * kPi; phR[k] = rng.next() * kPi; }
+        for (auto& v : soupVoice) v.reset();
+        soupVoiceRate = 0.0f;
         ringPos = 0; hopCount = 0; olaPos = 0;
         rA = rB = 8192.0f; rX = 0;
         for (auto& v : voicePh) v = 0.0f;
@@ -210,9 +228,22 @@ private:
             hopCount = 0;
             soupFrame (p);
         }
-        const Stereo out { olaL[(size_t) olaPos], olaR[(size_t) olaPos] };
+        Stereo out { olaL[(size_t) olaPos], olaR[(size_t) olaPos] };
         olaL[(size_t) olaPos] = olaR[(size_t) olaPos] = 0.0f;
         olaPos = (olaPos + 1) % (kN * 2);
+
+        // Voicing: in the Bad Mood demo Soup ran about 10 dB brighter than the original MOOD's
+        // reverb up to 3 kHz but just as dark above it, so a steep four-pole roll-off at
+        // 2.6 kHz (fixed in hertz, capped at 0.4 of the clock)
+        if (std::fabs (p.coreRate - soupVoiceRate) > soupVoiceRate * 0.002f)
+        {
+            soupVoiceRate = p.coreRate;
+            static constexpr float q[2] = { 0.5411961f, 1.3065630f };
+            const float fc = std::min (2600.0f, 0.4f * p.coreRate);
+            for (int c = 0; c < 2; ++c)
+                for (int st = 0; st < 2; ++st) soupVoice[c * 2 + st].setCutoff (fc, p.coreRate, q[st]);
+        }
+        out = { soupVoice[1].process (soupVoice[0].process (out.l)), soupVoice[3].process (soupVoice[2].process (out.r)) };
 
         if (p.spread) // Spread widens the wash further
         {
@@ -220,6 +251,40 @@ private:
             return { mid + side, mid - side };
         }
         return out;
+    }
+
+    // Sets every band's synthesis phase for this frame (see soupFrame). The two sides start
+    // at random offsets, so the wash is wide (the demo's Soup correlated about -0.1) but tonal.
+    void lockPhases (const std::vector<float>& acc, const std::vector<float>& adv, const std::vector<float>& ana,
+                     const std::vector<char>& fed, std::vector<float>& rel, std::vector<float>& ph, float jitter)
+    {
+        auto princarg = [] (float x) { return x - kTwoPi * std::floor ((x + kPi) / kTwoPi); };
+        const int half = kN / 2;
+        // peaks: bands louder than both neighbours
+        int nPk = 0;
+        for (int k = 1; k < half; ++k)
+            if (acc[(size_t) k] > acc[(size_t) (k - 1)] && acc[(size_t) k] >= acc[(size_t) (k + 1)] && acc[(size_t) k] > 1e-9f)
+                peaks[(size_t) nPk++] = k;
+        for (int i = 0; i < nPk; ++i)
+        {
+            const int pk = peaks[(size_t) i];
+            ph[(size_t) pk] = princarg (ph[(size_t) pk] + adv[(size_t) pk] + rng.next() * jitter);
+            // this peak's region runs to the quietest band between it and each neighbouring peak
+            int lo = i == 0 ? 1 : peaks[(size_t) (i - 1)], hi = i == nPk - 1 ? half : peaks[(size_t) (i + 1)];
+            int a = lo, b = hi;
+            for (int k = lo; k < pk; ++k) if (acc[(size_t) k] <= acc[(size_t) a]) a = k;
+            for (int k = pk + 1; k <= hi; ++k) if (acc[(size_t) k] < acc[(size_t) b]) b = k;
+            if (i == 0) a = 1;
+            if (i == nPk - 1) b = half;
+            for (int k = (i == 0 ? a : a + 1); k <= b; ++k)
+            {
+                if (k == pk) continue;
+                if (fed[(size_t) k] && fed[(size_t) pk]) rel[(size_t) k] = princarg (ana[(size_t) k] - ana[(size_t) pk]);
+                ph[(size_t) k] = princarg (ph[(size_t) pk] + rel[(size_t) k]);
+            }
+        }
+        if (nPk == 0)
+            for (int k = 1; k <= half; ++k) ph[(size_t) k] = princarg (ph[(size_t) k] + adv[(size_t) k]);
     }
 
     void soupFrame (const Params& p)
@@ -235,11 +300,28 @@ private:
         const float feed = (1.0f - dec) * 2.6f;
         const float m = clampf (p.modify, 0, 1);
 
+        // Phase vocoder: each band learns the true frequency it heard from how its phase moved
+        // since the last frame, and keeps re-synthesising at that frequency as it decays.
+        // (Pass 2: the old bin-centre advance plus a large random jump each frame turned held
+        // notes into noise, about -21 dB spectral flatness, where the Bad Mood demo's Soup
+        // measured a tonal -45 to -52 dB. Same lesson as Afterglow's freeze in dsp-lessons.md.)
+        auto princarg = [] (float x) { return x - kTwoPi * std::floor ((x + kPi) / kTwoPi); };
         for (int k = 0; k <= half; ++k)
         {
             const auto z = work[(size_t) k], zc = std::conj (work[(size_t) ((kN - k) & (kN - 1))]);
-            const float magL = std::abs ((z + zc) * 0.5f);
-            const float magR = std::abs ((z - zc) * 0.5f);
+            const auto Lc = (z + zc) * 0.5f, Rc = (z - zc) * SmallFFT::C (0.0f, -0.5f);
+            const float magL = std::abs (Lc), magR = std::abs (Rc);
+            const float adv = kTwoPi * (float) k * (float) kHop / (float) kN;
+            const float anaL = std::arg (Lc), anaR = std::arg (Rc);
+            // learn a band's frequency only while it is actually being fed
+            if (! p.freeze && magL * feed > 0.02f * accL[(size_t) k] + 1e-7f)
+                advL[(size_t) k] = adv + princarg (anaL - lastAnaL[(size_t) k] - adv);
+            if (! p.freeze && magR * feed > 0.02f * accR[(size_t) k] + 1e-7f)
+                advR[(size_t) k] = adv + princarg (anaR - lastAnaR[(size_t) k] - adv);
+            lastAnaL[(size_t) k] = anaL;
+            lastAnaR[(size_t) k] = anaR;
+            fedL[(size_t) k] = ! p.freeze && magL * feed > 0.02f * accL[(size_t) k] + 1e-7f;
+            fedR[(size_t) k] = ! p.freeze && magR * feed > 0.02f * accR[(size_t) k] + 1e-7f;
             if (! p.freeze)
             {
                 accL[(size_t) k] = accL[(size_t) k] * dec + magL * feed;
@@ -250,7 +332,14 @@ private:
         // Synthetic end: the bands are pooled into coarse groups whose energy sits on one partial
         const int group = 1 + (int) (m * m * 14.0f);
         const float quant = clampf ((m - 0.35f) / 0.65f, 0, 1);
-        const float jitter = (0.12f + 0.88f * m) * kPi;
+        // a breath of drift at the natural end, more smear towards synthetic
+        const float jitter = (0.015f + 0.3f * m * m) * kPi;
+
+        // Identity phase locking: each partial's peak band advances at its learned frequency;
+        // the bands round it keep the phase offsets they were heard with, so the three or four
+        // bands that make one partial never drift apart and beat (that wobbled 9 dB).
+        lockPhases (accL, advL, lastAnaL, fedL, relL, phL, jitter);
+        lockPhases (accR, advR, lastAnaR, fedR, relR, phR, jitter);
 
         work[0] = {};
         for (int k = 1; k <= half; ++k)
@@ -265,10 +354,6 @@ private:
                 aL = lerpf (aL, qL, quant);
                 aR = lerpf (aR, qR, quant);
             }
-            // natural: phases advance as the band's own frequency would, plus a little drift
-            const float adv = kTwoPi * (float) k * (float) kHop / (float) kN;
-            phL[(size_t) k] = std::fmod (phL[(size_t) k] + adv + rng.next() * jitter, kTwoPi);
-            phR[(size_t) k] = std::fmod (phR[(size_t) k] + adv + rng.next() * jitter, kTwoPi);
             const auto A = std::polar (aL, phL[(size_t) k]);
             const auto B = std::polar (aR, phR[(size_t) k]);
             if (k < half)
@@ -420,8 +505,12 @@ private:
     // ---- state ---------------------------------------------------------------------------
     SmallFFT fft;
     std::vector<SmallFFT::C> inRing, work;
-    std::vector<float> olaL, olaR, accL, accR, phL, phR, window;
+    std::vector<float> olaL, olaR, accL, accR, phL, phR, window, advL, advR, lastAnaL, lastAnaR, relL, relR;
+    std::vector<char> fedL, fedR;
+    std::vector<int> peaks;
     int ringPos = 0, hopCount = 0, olaPos = 0;
+    LowpassBiquad soupVoice[4];
+    float soupVoiceRate = 0.0f;
 
     DelayLine relayLine[2];
     float rA = 8192, rB = 8192;
