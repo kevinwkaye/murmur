@@ -92,6 +92,8 @@ if(MURMUR_BUILD_TESTS)
 
     add_executable(murmur_clock_quality_test Tests/ClockQualityTest.cpp)
     target_include_directories(murmur_clock_quality_test PRIVATE Source/engine)
+    add_executable(murmur_fidelity_test Tests/FidelityTest.cpp)
+    target_include_directories(murmur_fidelity_test PRIVATE Source/engine)
 
     # Plugin-level tests run the real processor and editor against a fake host
     add_executable(murmur_plugin_test Tests/PluginTest.cpp)

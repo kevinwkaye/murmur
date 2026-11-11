@@ -25,6 +25,10 @@
 - `.github/workflows/murmurgpt-windows.yml`: separate Windows VST3/standalone preview workflow. On successful Windows test and build steps it uploads a ZIP to a **GitHub prerelease**. It does not force-push the existing official `builds` branches. Do not interpret a workflow started or in progress as a successful Windows installer.
 - Read the latest GitHub release and workflow run **at the time you resume**. Confirm which commit built the preview and whether its checks passed.
 
+## Claude's fidelity pass (2026-11-11)
+
+Claude measured the pedal demos Kevin supplied against the plugin, then made three reversible engine changes plus an end-to-end fidelity test: Stretch grain alignment, reverb damping and stereo, and clock grit kept with images removed. Read `docs/Claude_Fidelity_Pass_2026-11-11.md` before changing the reverb, Stretch or the clock path. The Windows preview zip is also pushed to the `builds-murmurgpt` branch.
+
 ## Critical instructions for resuming work
 1. Review **both branches**, starting with `git fetch origin && git switch MurmurGPT && git pull --ff-only origin MurmurGPT`. If the user wants a later main change integrated, use a cautious merge/rebase with backups, not an overwrite.
 2. Read `docs/MurmurGPT_DSP_AUDIT.md` and inspect `git diff origin/main...MurmurGPT` plus the GitHub Actions run for `MurmurGPT validation`. Do not assume tests have passed until verified.

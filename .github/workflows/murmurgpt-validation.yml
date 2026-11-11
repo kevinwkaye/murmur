@@ -21,6 +21,10 @@ jobs:
         run: c++ -std=c++17 -O2 -Wall -Wextra -ISource/engine Tests/ClockQualityTest.cpp -o clock_quality_test
       - name: Run clock quality test
         run: ./clock_quality_test
+      - name: Compile fidelity test
+        run: c++ -std=c++17 -O2 -Wall -Wextra -ISource/engine Tests/FidelityTest.cpp -o fidelity_test
+      - name: Run fidelity test
+        run: ./fidelity_test
       - name: Compile existing offline render test
         run: c++ -std=c++17 -O2 -ISource/engine Tests/RenderTest.cpp -o murmur_render_test
       - name: Run existing offline render test

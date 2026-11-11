@@ -90,5 +90,15 @@ Use GitHub Actions > *MurmurGPT validation* for actual branch check results. A s
 ## Reference constraints
 Official behavioural reference should come from Chase Bliss documentation and manuals for MOOD MKII and BAD MOOD. The exact proprietary algorithms are unknown. Do not copy copyrighted code or claim numerical recreation of undocumented internals.
 
+## Claude fidelity pass (2026-11-11)
+
+Full write-up: `docs/Claude_Fidelity_Pass_2026-11-11.md`. In short:
+- Same-machine benchmarks show ChatGPT's clock filters cost almost nothing. The CPU rises noted above came from different cloud runners.
+- The P2 Stretch concern was real and serious: a steady tone fluttered 22 dB. Grains now line up by correlation (0.0 to 0.8 dB).
+- Tape seams (0.4 to 0.9 dB) and Env (0.4 to 0.5 dB) measured fine.
+- Reverb: highs rang as long as lows and the sides were unrelated (correlation 0.1). The demos show highs dying faster and partly correlated sides. Damping, slower modulation and side blending were added.
+- Clock: the steep input filter removed the low-clock aliasing grit that Chase Bliss describes as part of the sound. The gentle input filter is back, and the four-pole output filter stays (cutoff 0.45 of the clock rate).
+- `Tests/FidelityTest.cpp` checks all three end to end.
+
 ## Handover notes for Claude
 See `docs/CLAUDE_HANDOVER_MurmurGPT.md`. It is authoritative for changes completed on this branch and should be read together with `git diff main...MurmurGPT`, source code and actual CI logs.

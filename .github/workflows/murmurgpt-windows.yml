@@ -43,6 +43,12 @@ jobs:
           & .\build\Release\murmur_env_slice_test.exe | Tee-Object -FilePath reports\env-slice.txt
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Run fidelity test (measured against the pedal demos)
+        shell: pwsh
+        run: |
+          & .\build\Release\murmur_fidelity_test.exe | Tee-Object -FilePath reports\fidelity.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Run complete DSP render tests
         shell: pwsh
         run: |
@@ -89,9 +95,13 @@ jobs:
           install, rather than appear as a second separate plugin. Keep
           your original VST3 backed up and save a copy of important projects.
 
-          Changes: improved clock filtering and fractional input timing
-          for non-Classic modes; Env micro-loop seam fix. These are
-          experimental DSP improvements. A/B listening against the hardware
+          Changes (ChatGPT): clock reconstruction filtering and fractional
+          input timing for non-Classic modes; Env micro-loop seam fix.
+          Changes (Claude, measured against the pedal demos): reverb tails
+          darken as they decay and keep a pedal-like stereo image; Stretch
+          grains line up so held notes stop fluttering; low Clock settings
+          keep the pedal's aliasing grit without fizzy images. See
+          docs/MurmurGPT_DSP_AUDIT.md. A/B listening against the hardware
           is still required, and fidelity is NOT certified.
 
           Source and handover:
@@ -119,3 +129,16 @@ jobs:
           official plugin identity, so Windows/DAWs may replace the original install.
           "@ | Set-Content release-notes.md
           gh release create "$tag" .\MurmurGPT-Windows.zip --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" --title "MurmurGPT Windows preview $env:GITHUB_RUN_NUMBER" --notes-file release-notes.md --prerelease
+
+      # The same zip on its own branch, so it can be fetched with plain git as well.
+      # This never touches the official 'builds' or 'builds-linux-arm64' branches.
+      - name: Publish to the builds-murmurgpt branch
+        shell: pwsh
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout --orphan builds-murmurgpt
+          git rm -r -q --cached .
+          git add -f MurmurGPT-Windows.zip
+          git commit -q -m "MurmurGPT Windows preview $env:GITHUB_RUN_NUMBER, $env:GITHUB_SHA"
+          git push -f origin builds-murmurgpt
