@@ -59,6 +59,7 @@ public:
         }
         for (auto& f : fdn) f.clear();
         for (auto& z : fdnLp) z = 0.0f;
+        tapDamp[0] = tapDamp[1] = 0.0f;
         lastTap = {};
         dA = dB = dCur = 4096.0f; xfade = 0;
         slipCur = {}; slipPrev = {}; slipCounter = 0.0f; slipPan = 0.0f;
@@ -174,8 +175,16 @@ private:
         if (p.spread)
             inL = inR = 0.5f * (in.l + in.r);
 
-        tapLine[0].push (softClip (inL + fb * 0.3f * lastTap.r));
-        tapLine[1].push (softClip (inR + fb * 0.3f * lastTap.l));
+        // the taps' own feedback loses treble each pass too, so the whole tail darkens as it decays
+        Stereo fbk { fb * 0.3f * lastTap.r, fb * 0.3f * lastTap.l };
+        if (! p.classic)
+        {
+            tapDamp[0] += kTapDamp * (fbk.l - tapDamp[0]);
+            tapDamp[1] += kTapDamp * (fbk.r - tapDamp[1]);
+            fbk = { tapDamp[0], tapDamp[1] };
+        }
+        tapLine[0].push (softClip (inL + fbk.l));
+        tapLine[1].push (softClip (inR + fbk.r));
 
         float tl = 0.0f, tr = 0.0f, g = 0.42f;
         for (int i = 0; i < 8; ++i)
@@ -205,13 +214,27 @@ private:
             dr = diff[1][j].process (dr, 1.0f + S * kDiffR[j]);
         }
 
-        // 4-line feedback delay network for the tail, gently modulated
+        // 4-line feedback delay network for the tail, slowly modulated.
+        // The pedal's tails measured highs dying 2 to 3 times faster than lows (MOOD MKII
+        // demo: low 7.5 s, mid 3.3 s, high 2.2 s), so each pass loses more top than bottom:
+        // the gain at about 4 kHz (at the 64 kHz clock) is set so the treble's decay time is
+        // kHighDecay of the bass's. Everything is at the core rate, so it follows the Clock.
         const float fdnFb = lerpf (0.6f, 0.98f, t);
-        const float depth = 4.0f + 10.0f * (S / 24000.0f);
+        if (! p.classic && fdnFb != dampFor)
+        {
+            dampFor = fdnFb;
+            const float g = std::pow (fdnFb, 1.0f / kHighDecay - 1.0f); // high-band gain relative to DC, per pass
+            const float c = std::cos (kTwoPi * 4000.0f / 64000.0f);
+            const float g2 = g * g, A = 1.0f - g2, B = 1.0f - g2 * c;
+            dampA = A < 1e-6f ? 0.0f : (B - std::sqrt (std::max (0.0f, B * B - A * A))) / A;
+        }
+        // slow, deep wander (about 0.6 to 1.3 Hz at 64 kHz) instead of a fast 7 to 12 Hz shimmer
+        const float depth = p.classic ? 4.0f + 10.0f * (S / 24000.0f) : 24.0f + 40.0f * (S / 24000.0f);
+        const float rate = p.classic ? 0.00011f : 0.0000095f;
         float o[4];
         for (int k = 0; k < 4; ++k)
         {
-            lfo[k] += (0.00011f + 0.00003f * (float) k);
+            lfo[k] += rate + (p.classic ? 0.00003f : 0.0000033f) * (float) k;
             if (lfo[k] > 1.0f) lfo[k] -= 1.0f;
             o[k] = fdn[k].tap (S * kFdn[k] + 8.0f + depth * (1.0f + std::sin (kTwoPi * lfo[k])));
         }
@@ -222,18 +245,29 @@ private:
         const float hin[4] = { h0, h1, h2, h3 };
         const float inG = m * 0.6f * (1.0f - 0.6f * fdnFb); // keeps long tails from piling up
         const float fin[4] = { dl * inG, dr * inG, -dl * inG, -dr * inG };
+        const float a = p.classic ? 0.22f : dampA;
         for (int k = 0; k < 4; ++k)
         {
-            fdnLp[k] = hin[k] + 0.22f * (fdnLp[k] - hin[k]);
+            fdnLp[k] = hin[k] + a * (fdnLp[k] - hin[k]);
             fdn[k].push (softClip (fin[k] + fdnFb * fdnLp[k]));
         }
         const float tailL = 0.5f * (o[0] + o[2]);
         const float tailR = 0.5f * (o[1] + o[3]);
 
+
         Stereo out {
             lerpf (tl * 1.1f, dl * 0.8f + tailL * 1.6f, m),
             lerpf (tr * 1.1f, dr * 0.8f + tailR * 1.6f, m)
         };
+
+        if (! p.classic && ! p.spread)
+        {
+            // The pedal's tails measured 0.55 to 0.9 left/right correlation; fully independent
+            // sides (0.0) sound hollow and phasey. Blending some of each side into the other
+            // brings it to about 0.6. Spread keeps the full width.
+            constexpr float k = 0.33f, norm = 0.9496f; // 1 / sqrt (1 + k^2)
+            out = { (out.l + k * out.r) * norm, (out.r + k * out.l) * norm };
+        }
 
         if (p.classic) // resonant, ringy trails
         {
@@ -468,6 +502,10 @@ private:
     std::array<DelayLine, 4> fdn;
     float fdnLp[4] {};
     float lfo[4] {};
+    static constexpr float kHighDecay = 0.25f; // treble decay time as a share of the bass's
+    float dampFor = -1.0f, dampA = 0.22f;
+    float tapDamp[2] {};
+    static constexpr float kTapDamp = 0.33f; // one pole at about 4.2 kHz at the 64 kHz clock
     Stereo lastTap;
     OnePole tone[2];
 
