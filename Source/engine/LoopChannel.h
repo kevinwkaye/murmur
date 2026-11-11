@@ -260,45 +260,61 @@ private:
         if (win < 16 || range < 2) return nominal;
         const int stride = win >= 128 ? 2 : 1;
         const float base = outgoing.startPos + outgoing.dir * outgoing.age;
-        auto mono = [this, Lf] (float pos)
-        {
-            const int i = (int) wrapPos (std::floor (pos), Lf);
-            const size_t k = (size_t) phys (i);
-            return buf[0][k] + buf[1][k];
-        };
+        // reads walk the loop with an integer index: one wrap per step instead of a floor,
+        // a division and a modulo on every sample (this search was a third of the worst case)
+        const int Li = std::max (1, L), stepDir = dir < 0.0f ? -1 : 1;
+        auto firstIndex = [&] (float pos) { return (int) wrapPos (std::floor (pos), Lf) % Li; };
+        auto at = [&] (int li) { int k = start + li; if (k >= Li) k -= Li; return buf[0][(size_t) k] + buf[1][(size_t) k]; };
+        auto advance = [Li] (int li, int by) { li += by; if (li >= Li) li -= Li; else if (li < 0) li += Li; return li; };
         // the outgoing grain's next stretch, and its energy
         float ref[512];
         float refE = 1e-9f;
         int nRef = 0;
-        for (int k = 0; k < win; k += stride, ++nRef)
         {
-            ref[nRef] = mono (base + outgoing.dir * (float) k);
-            refE += ref[nRef] * ref[nRef];
-        }
-        auto score = [&] (float cand)
-        {
-            float xy = 0.0f, yy = 1e-9f;
-            int n = 0;
-            for (int k = 0; k < win; k += stride, ++n)
+            int li = firstIndex (base);
+            const int by = (outgoing.dir < 0.0f ? -1 : 1) * stride;
+            for (int k = 0; k < win; k += stride, ++nRef, li = advance (li, by))
             {
-                const float y = mono (cand + dir * (float) k);
+                ref[nRef] = at (li);
+                refE += ref[nRef] * ref[nRef];
+            }
+        }
+        // every `skip`-th reference point: coarse passes look at a quarter of the window
+        auto score = [&] (float cand, int skip)
+        {
+            float xy = 0.0f, yy = 1e-9f, xx = 1e-9f;
+            int li = firstIndex (cand);
+            const int by = stepDir * stride * skip;
+            for (int n = 0; n < nRef; n += skip, li = advance (li, by))
+            {
+                const float y = at (li);
                 xy += ref[n] * y;
                 yy += y * y;
+                xx += ref[n] * ref[n];
             }
-            return xy / std::sqrt (refE * yy);
+            return xy / std::sqrt (xx * yy);
         };
+        // three passes: coarse steps on a thinned window, then step 2, then step 1
+        // (the same alignment as an exhaustive fine search, for about a third of the work)
         const int coarse = std::max (1, range / 24);
         float best = nominal, bestScore = -2.0f;
         for (int off = -range; off <= range; off += coarse)
         {
-            const float sc = score (nominal + (float) off);
+            const float sc = score (nominal + (float) off, 2);
             if (sc > bestScore) { bestScore = sc; best = nominal + (float) off; }
         }
-        const float centre = best;
-        for (int off = -coarse + 1; off < coarse; ++off)
+        float centre = best;
+        bestScore = score (centre, 1);
+        for (int off = -coarse + 2; off < coarse; off += 2)
         {
             if (off == 0) continue;
-            const float sc = score (centre + (float) off);
+            const float sc = score (centre + (float) off, 1);
+            if (sc > bestScore) { bestScore = sc; best = centre + (float) off; }
+        }
+        centre = best;
+        for (int off : { -1, 1 })
+        {
+            const float sc = score (centre + (float) off, 1);
             if (sc > bestScore) { bestScore = sc; best = centre + (float) off; }
         }
         return wrapPos (best, Lf);
